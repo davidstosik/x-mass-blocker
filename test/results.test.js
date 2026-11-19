@@ -24,12 +24,13 @@ test("a missing log loads as empty", async () => {
 test("record appends one JSON line and creates the folder", async () => {
   const file = await tempFile();
   const log = await ResultLog.load(file);
-  await log.record("alice", "blocked", { list: LIST });
+  await log.record("alice", "blocked", { list: LIST, userId: "9007199254740993" });
   await log.record("bob", "failed", { note: "HTTP 500", list: LIST });
 
   const lines = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(lines.length, 2);
-  assert.deepEqual(Object.keys(lines[0]), ["username", "status", "list", "at"]);
+  assert.equal(lines[0].userId, "9007199254740993");
+  assert.equal((await ResultLog.load(file)).lastAction("alice").userId, lines[0].userId);
   assert.deepEqual(Object.keys(lines[1]), ["username", "status", "note", "list", "at"]);
 });
 
@@ -106,14 +107,16 @@ describe("pardoned", () => {
     entry("deleted", "not_found"),
     entry("retry", "blocked"),
     entry("retry", "failed"),
-  ]);
+  ].map((result) => ({ ...result, userId: "123" })).concat(
+    entry("legacy", "blocked"),
+    entry("legacy", "already_blocked", { userId: "456" }),
+    entry("invalidId", "blocked", { userId: 123 }),
+  ));
 
   test("returns the tool's blocks from this list that left it", () => {
-    assert.deepEqual(log.pardoned(LIST, ["kept"]), ["pardoned", "rechecked", "retry"]);
-  });
-
-  test("never includes accounts blocked before the tool got to them", () => {
-    assert.ok(!log.pardoned(LIST, []).includes("userBlocked"));
+    assert.deepEqual(log.pardoned(LIST, ["kept"]).map(({ username, userId }) => [username, userId]), [
+      ["pardoned", "123"], ["rechecked", "123"], ["retry", "123"],
+    ]);
   });
 
   test("matches the list case-insensitively", () => {
@@ -122,7 +125,7 @@ describe("pardoned", () => {
 
   test("blockedFrom counts what the tool blocked from a list and hasn't unblocked", () => {
     assert.deepEqual(log.blockedFrom("/tmp/other.txt"), ["otherList"]);
-    assert.equal(log.blockedFrom(LIST).length, 6);
+    assert.equal(log.blockedFrom(LIST).length, 8);
   });
 });
 

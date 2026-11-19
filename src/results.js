@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { isUserId } from "./user-id.js";
 
 /** Handles with one of these statuses are skipped by later block runs (unless --recheck). */
 export const FINAL_STATUSES = new Set(["blocked", "already_blocked", "not_found", "suspended"]);
@@ -11,7 +12,7 @@ const ACTIONS = new Set(["blocked", "unblocked"]);
 const NOTHING_TO_UNBLOCK = new Set(["not_blocked", "not_found", "suspended"]);
 
 /**
- * The append-only results log: one JSON line per visit, `{username, status, note?, list, at}`.
+ * The append-only results log: one JSON line per visit, `{username, status, note?, list, userId?, at}`.
  * The latest line for a handle is its current state; its latest blocked/unblocked line is
  * the last thing the tool did to it. Earlier lines are kept as history.
  */
@@ -47,8 +48,15 @@ export class ResultLog {
     return FINAL_STATUSES.has(this.latest(username)?.status);
   }
 
-  async record(username, status, { note, list } = {}) {
-    const entry = { username, status, ...(note ? { note } : {}), ...(list ? { list } : {}), at: new Date().toISOString() };
+  async record(username, status, { note, list, userId } = {}) {
+    const entry = {
+      username,
+      status,
+      ...(note ? { note } : {}),
+      ...(list ? { list } : {}),
+      ...(isUserId(userId) ? { userId } : {}),
+      at: new Date().toISOString(),
+    };
     await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
     await appendFile(this.file, `${JSON.stringify(entry)}\n`);
     this.#remember(entry);
@@ -69,12 +77,13 @@ export class ResultLog {
 
   /**
    * Accounts the tool blocked from `list` that are no longer on it (`handles` is the list as it is
-   * now). Accounts that were already blocked before the tool got to them are never included.
+   * now). Returns the block entries that establish the original account's ID.
    */
   pardoned(list, handles) {
     const onList = new Set(handles.map((handle) => handle.toLowerCase()));
-    return this.blockedFrom(list).filter(
-      (username) => !onList.has(username.toLowerCase()) && !NOTHING_TO_UNBLOCK.has(this.latest(username).status),
+    return [...this.#lastAction.values()].filter(
+      ({ username, status, list: source, userId }) => status === "blocked" && source === list &&
+        isUserId(userId) && !onList.has(username.toLowerCase()) && !NOTHING_TO_UNBLOCK.has(this.latest(username).status),
     );
   }
 

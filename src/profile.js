@@ -1,11 +1,12 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { TIMING } from "./config.js";
+import { isUserId } from "./user-id.js";
 
 /**
  * Opens https://x.com/HANDLE and works out what it shows, from two signals:
  * X's UserByScreenName API response (when we catch it) and the rendered page.
  *
- * Resolves to `{status, note?}` where status is one of:
+ * Resolves to `{status, note?, userId?}` where status is one of:
  *   ready, already_blocked, not_found, suspended, unavailable, mismatch,
  *   rate_limited, error (temporary), logged_out.
  */
@@ -28,13 +29,17 @@ export async function inspectProfile(page, handle) {
   try {
     await page.goto(`https://x.com/${handle}`, { waitUntil: "domcontentloaded", timeout: TIMING.profileTimeout });
     const deadline = Date.now() + TIMING.profileTimeout;
+    let verdict;
     while (Date.now() < deadline) {
       if (isLoginUrl(page.url())) return { status: "logged_out" };
-      const verdict = judgeProfile(handle, lookup, await probe(page));
-      if (verdict) return verdict;
+      const rendered = await probe(page);
+      verdict = judgeProfile(handle, lookup, rendered);
+      const actionable = verdict?.status === "ready" || verdict?.status === "already_blocked";
+      // The DOM can be ready before the lookup body arrives. Give it time to supply an ID.
+      if (verdict && (!actionable || verdict.userId || (lookup && !isUserId(lookup.userId)))) return verdict;
       await sleep(TIMING.pollInterval);
     }
-    return { status: "error", note: "profile page did not load" };
+    return verdict ?? { status: "error", note: "profile page did not load" };
   } finally {
     page.off("response", onResponse);
   }
@@ -49,7 +54,7 @@ export function isLoginUrl(url) {
 /**
  * Reads X's UserByScreenName GraphQL response. Returns null when it tells us nothing, or one of:
  *   {kind: "rate_limited"}, {kind: "not_found"}, {kind: "suspended", reason},
- *   {kind: "unavailable", reason}, {kind: "user", handle, blocked}
+ *   {kind: "unavailable", reason}, {kind: "user", handle, blocked, userId?}
  */
 export function classifyLookup(httpStatus, body) {
   if (httpStatus === 429) return { kind: "rate_limited" };
@@ -70,6 +75,7 @@ export function classifyLookup(httpStatus, body) {
       kind: "user",
       handle: result.core?.screen_name ?? result.legacy?.screen_name ?? null,
       blocked: Boolean(result.relationship_perspectives?.blocking ?? result.legacy?.blocking),
+      ...(isUserId(result.rest_id) ? { userId: result.rest_id } : {}),
     };
   }
   return null;
@@ -123,14 +129,17 @@ export function judgeProfile(target, lookup, page) {
       return { status: "unavailable", note: lookup.reason || undefined };
     case "user":
       if (lookup.handle && !isTarget(lookup.handle)) return mismatch(lookup.handle);
-      if (lookup.blocked) return { status: "already_blocked" };
+      if (lookup.blocked && page?.kind !== "profile") return { status: "already_blocked" };
   }
 
   switch (page?.kind) {
     case "profile":
       if (!page.handle) return null;
       if (!isTarget(page.handle)) return mismatch(page.handle);
-      return { status: page.blocked ? "already_blocked" : "ready" };
+      return {
+        status: page.blocked || (lookup?.kind === "user" && lookup.blocked) ? "already_blocked" : "ready",
+        ...(lookup?.handle && isUserId(lookup.userId) ? { userId: lookup.userId } : {}),
+      };
     case "suspended":
     case "not_found":
       return { status: page.kind };
@@ -144,9 +153,9 @@ export function judgeProfile(target, lookup, page) {
 function isLookupFor(url, handle) {
   try {
     const screenName = JSON.parse(url.searchParams.get("variables"))?.screen_name;
-    return !screenName || screenName.toLowerCase() === handle.toLowerCase();
+    return typeof screenName === "string" && screenName.toLowerCase() === handle.toLowerCase();
   } catch {
-    return true;
+    return false;
   }
 }
 

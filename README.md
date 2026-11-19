@@ -128,6 +128,8 @@ Exit codes: `0` done, `1` error, `2` stopped early (daily cap, rate limit or rep
 
 Appeals are reviewed by hand on levels.io, and an accepted one simply removes the handle from the list. So at the start of each run, the script looks for accounts **it** blocked from this list that are no longer on it, and unblocks them first. Accounts you had blocked yourself before the script got to them are never unblocked.
 
+The script verifies that the profile's stable X user ID matches the ID saved with the original block. It skips pardons if the handle has changed hands or either ID is unavailable, including older log entries without an ID.
+
 A broken or cut-off download would look like a mass pardon. So if more than 10 accounts, or 5% of the script's blocks, left the list at once, the script unblocks none of them and says so. If the list really shrank, run again with `--allow-mass-unblock`.
 
 ## Files and privacy
@@ -137,10 +139,10 @@ Everything lives in `~/.config/x-mass-blocker/` (or `$XDG_CONFIG_HOME/x-mass-blo
 - `session.json` holds your X session cookies. **Anyone with this file can use your X account.** It's readable only by you (`chmod 600`). To revoke it, run `logout`. Deleting the file yourself isn't enough: a copy of it would keep working until the session is logged out. You can also end the session in X's settings (Security and account access > Apps and sessions).
 - `results.jsonl` is the record of every run. Lines are only ever added, one per visit, so an account's history stays readable:
   ```jsonl
-  {"username":"example","status":"blocked","list":"https://blockedforaireply.levels.io/api/usernames.txt","at":"2026-11-20T09:42:03.551Z"}
-  {"username":"example","status":"unblocked","note":"no longer on the list","list":"https://blockedforaireply.levels.io/api/usernames.txt","at":"2026-12-02T10:01:44.120Z"}
+  {"username":"example","status":"blocked","list":"https://blockedforaireply.levels.io/api/usernames.txt","userId":"9007199254740993","at":"2026-11-20T09:42:03.551Z"}
+  {"username":"example","status":"unblocked","note":"no longer on the list","list":"https://blockedforaireply.levels.io/api/usernames.txt","userId":"9007199254740993","at":"2026-12-02T10:01:44.120Z"}
   ```
-  `blocked` and `unblocked` are what the script did. The other statuses are what it found: `already_blocked` (blocked before the script got there), `not_blocked` (already unblocked when it came to unblock), `not_found`, `suspended`, `unavailable`, `mismatch` (the page showed another handle) and `failed`.
+  `blocked` and `unblocked` are what the script did. The other statuses are what it found: `already_blocked` (blocked before the script got there), `not_blocked` (already unblocked when it came to unblock), `not_found`, `suspended`, `unavailable`, `mismatch` (the handle or user ID couldn't be verified) and `failed`.
 
 The script only talks to X and to the list's URL.
 

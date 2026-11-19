@@ -31,7 +31,7 @@ export async function run({ paths, list, limit, dailyCap, dryRun, headed, rechec
     : { toUnblock: [], heldBack: 0 };
   const toBlock = recheck ? handles : handles.filter((handle) => !log.isDone(handle));
   const tasks = [
-    ...toUnblock.map((handle) => ({ handle, unblock: true })),
+    ...toUnblock.map(({ username, userId }) => ({ handle: username, unblock: true, expectedUserId: userId })),
     ...toBlock.map((handle) => ({ handle, unblock: false })),
   ];
   const queue = limit ? tasks.slice(0, limit) : tasks;
@@ -100,8 +100,8 @@ class Runner {
       for (const [index, task] of queue.entries()) {
         if (this.#dailyCapReached()) return "daily_cap";
 
-        const { status, note, rateLimited } = await this.#visit(task);
-        if (!this.dryRun) await this.log.record(task.handle, status, { note, list: this.list });
+        const { status, note, rateLimited, userId } = await this.#visit(task);
+        if (!this.dryRun) await this.log.record(task.handle, status, { note, list: this.list, userId });
         this.counts[status] = (this.counts[status] ?? 0) + 1;
         this.visited++;
         const position = `[${String(index + 1).padStart(String(queue.length).length)}/${queue.length}]`;
@@ -123,17 +123,17 @@ class Runner {
   }
 
   /** One account, retrying temporary errors (30s, 15 min, 15 min) before giving up. */
-  async #visit({ handle, unblock }) {
-    let actionSent = false;
+  async #visit({ handle, unblock, expectedUserId }) {
+    let actionUserId;
     for (let attempt = 0; ; attempt++) {
-      const outcome = await this.#attempt(handle, unblock);
-      actionSent ||= Boolean(outcome.actionSent);
+      const outcome = await this.#attempt(handle, unblock, expectedUserId ?? actionUserId);
+      if (outcome.actionSent) actionUserId = outcome.userId ?? null;
 
       if (!TEMPORARY.has(outcome.status)) {
         // An earlier attempt clicked but couldn't confirm it, and this one finds it done: it went through.
         const echo = unblock ? "not_blocked" : "already_blocked";
-        if (actionSent && outcome.status === echo) {
-          return { status: unblock ? "unblocked" : "blocked", note: "confirmed on retry" };
+        if (actionUserId !== undefined && outcome.status === echo) {
+          return { status: unblock ? "unblocked" : "blocked", note: "confirmed on retry", userId: actionUserId };
         }
         return outcome.status === "unblocked" ? { ...outcome, note: "no longer on the list" } : outcome;
       }
@@ -150,18 +150,25 @@ class Runner {
     }
   }
 
-  async #attempt(handle, unblock) {
+  async #attempt(handle, unblock, expectedUserId) {
     try {
       await this.#ensurePage();
       const verdict = await inspectProfile(this.#page, handle);
       if (verdict.status === "logged_out") throw notLoggedIn();
+      if ((unblock || expectedUserId !== undefined) &&
+          (verdict.status === "ready" || verdict.status === "already_blocked")) {
+        if (!expectedUserId || !verdict.userId) return { status: "mismatch", note: "could not verify X user ID" };
+        if (expectedUserId !== verdict.userId) return { status: "mismatch", note: "X user ID differs from the recorded ID" };
+      }
       if (unblock) {
         if (verdict.status === "ready") return { status: "not_blocked" };
         if (verdict.status !== "already_blocked") return verdict;
       } else if (verdict.status !== "ready") {
         return verdict;
       }
-      return await toggleBlock(this.#page, handle, { unblock, dryRun: this.dryRun });
+      const outcome = await toggleBlock(this.#page, handle, { unblock, dryRun: this.dryRun });
+      if (outcome.actionSent) return { ...outcome, userId: verdict.userId };
+      return outcome;
     } catch (error) {
       if (error instanceof NotLoggedInError) throw error;
       // Playwright or browser error: start over with a fresh page (or a fresh Chrome) next time.
