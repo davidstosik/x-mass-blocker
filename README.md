@@ -137,6 +137,8 @@ A broken or cut-off download would look like a mass pardon. So if more than 10 a
 
 ## Files and privacy
 
+Commands that use the session (`login`, `logout`, and `run`, including dry runs) take exclusive access to the state directory. If another command holds it, the CLI exits with code 1 and you can retry after that command finishes. Interrupted commands release access once their process exits, and the next command clears abandoned claims. `stats` can still read the journal while another command runs.
+
 Everything lives in `~/.config/x-mass-blocker/` (or `$XDG_CONFIG_HOME/x-mass-blocker/`, or `$X_MASS_BLOCKER_HOME`):
 
 - `session.json` holds your X session cookies. **Anyone with this file can use your X account.** It's readable only by you (`chmod 600`). To revoke it, run `logout`. Deleting the file yourself isn't enough: a copy of it would keep working until the session is logged out. You can also end the session in X's settings (Security and account access > Apps and sessions).

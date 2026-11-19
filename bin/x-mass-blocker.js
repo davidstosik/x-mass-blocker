@@ -5,6 +5,7 @@ import { CliError } from "../src/errors.js";
 import { login, loginWithPastedCookies, logout } from "../src/login.js";
 import { ResultLog } from "../src/results.js";
 import { run } from "../src/runner.js";
+import { withStateLock } from "../src/state-lock.js";
 
 const help = (paths) => `Block every X account on levels.io's "blocked for AI reply" list.
 
@@ -33,6 +34,9 @@ Run verifies the signed-in X account before using its history, even with no task
 Blocks and unblocks are recorded only after X confirms the action for the verified target
 or a retry verifies the target’s new state after a missing reply.
 
+Login, logout and run (including dry runs) require exclusive access to the state folder.
+If it is busy, try again after the other command finishes.
+
 Exit codes: 0 done, 1 error, 2 stopped early (run again later), 3 not logged in.
 Session and results are kept in ${paths.dir}
 (set X_MASS_BLOCKER_HOME to use another folder).
@@ -42,14 +46,16 @@ const progress = (message) => process.stderr.write(`${message}\n`);
 
 async function loginCommand(args, paths) {
   const { paste } = parse(args, { paste: { type: "boolean" } });
-  if (paste) await loginWithPastedCookies(paths.session, progress);
-  else await login(paths.session, progress);
+  await withStateLock(paths.dir, () => {
+    if (paste) return loginWithPastedCookies(paths.session, progress);
+    return login(paths.session, progress);
+  });
   return EXIT.OK;
 }
 
 async function logoutCommand(args, paths) {
   parse(args, {});
-  await logout(paths.session, progress);
+  await withStateLock(paths.dir, () => logout(paths.session, progress));
   return EXIT.OK;
 }
 

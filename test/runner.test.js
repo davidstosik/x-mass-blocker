@@ -126,7 +126,11 @@ async function fixture(t, { blocked = true, initialVerification, recovery = [] }
     actions,
     closed: () => closed,
     session: async (token) => writeFile(paths.session, JSON.stringify({ cookies: [{ name: "auth_token", value: token }] })),
-    run: (options) => run({ paths, list, unblock: true, progress: () => {}, ...options }, { startBrowser }),
+    run: (options, dependencies) => run(
+      { paths, list, unblock: true, progress: () => {}, ...options },
+      { startBrowser, ...dependencies },
+    ),
+    startBrowser,
   };
 }
 
@@ -152,6 +156,38 @@ test("switching accounts isolates actions, observations, and the daily cap", asy
   assert.deepEqual(f.visited, ["target"]);
   assert.deepEqual(f.verified, [`${B}:second:initial`, `${A}:renamed:refreshed`]);
   assert.equal(f.closed(), 2);
+});
+
+test("overlapping runs cannot both spend the last daily-cap slot", async (t) => {
+  const f = await fixture(t, { blocked: false });
+  await f.session(`${A}:first:initial`);
+  const log = await ResultLog.load(f.paths.results, A);
+  await log.record("prior", "blocked", { list: f.list, userId: "43" });
+  let started;
+  let resume;
+  const browserStarting = new Promise((resolve) => { started = resolve; });
+  const browserMayStart = new Promise((resolve) => { resume = resolve; });
+
+  const first = f.run({ dailyCap: 2, unblock: false }, {
+    startBrowser: async (options) => {
+      started();
+      await browserMayStart;
+      return f.startBrowser(options);
+    },
+  });
+  try {
+    await Promise.race([browserStarting, first]);
+    await assert.rejects(f.run({ dailyCap: 2 }), /State directory is busy/);
+  } finally {
+    resume();
+    await first;
+  }
+  assert.equal((await first).blocked, 1);
+
+  // Recheck would visit the same target again if there were still room under the cap.
+  assert.equal((await f.run({ dailyCap: 2, recheck: true })).stopped, "daily_cap");
+  assert.deepEqual(f.actions, ["target"]);
+  assert.equal((await ResultLog.load(f.paths.results, A)).countActionsSince(Date.now() - DAY), 2);
 });
 
 test("refreshing a session keeps history even when there are no queued tasks", async (t) => {

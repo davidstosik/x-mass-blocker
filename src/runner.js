@@ -1,3 +1,4 @@
+import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { readSession, XBrowser } from "./browser.js";
 import { DAY, MASS_UNBLOCK, MAX_FAILURES_IN_A_ROW, TIMING } from "./config.js";
@@ -6,6 +7,7 @@ import { listId, loadList } from "./list.js";
 import { AccountIdentityError, AccountVerificationRateLimitError, checkLogin, verifyAccountId } from "./login.js";
 import { inspectProfile } from "./profile.js";
 import { ResultLog } from "./results.js";
+import { withStateLock } from "./state-lock.js";
 
 const TEMPORARY = new Set(["rate_limited", "error"]);
 const ACTED = new Set(["blocked", "unblocked", "would_block", "would_unblock"]);
@@ -21,7 +23,11 @@ const STOP_MESSAGES = {
  * every account on the list that isn't done yet. Each result is appended to the log right
  * away, so stopping at any point loses nothing.
  */
-export async function run(
+export async function run(options, dependencies) {
+  return withStateLock(path.dirname(options.paths.session), () => runLocked(options, dependencies));
+}
+
+async function runLocked(
   { paths, list, limit, dailyCap, dryRun, headed, recheck, unblock, allowMassUnblock, progress },
   { startBrowser = (options) => XBrowser.start(options) } = {},
 ) {
