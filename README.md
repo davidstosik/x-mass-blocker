@@ -121,6 +121,7 @@ Exit codes: `0` done, `1` error, `2` stopped early (daily cap, rate limit or rep
 - It drives your installed Chrome through [Playwright](https://playwright.dev), headless, with your saved session, and hides the usual automation markers.
 - For each username it opens `x.com/USERNAME` and reads both X's own API response and the page to tell whether the account exists, is suspended or is already blocked.
 - It checks that the profile and the Block menu show the right handle, then blocks through the ··· menu the way you would, one account every 3 to 5 seconds.
+- It records a block or unblock after X confirms the target’s user ID and handle. If the action reply is missing, a retry can confirm the change by checking the block state of the same user ID.
 - On errors it retries after 30 seconds, then 15 minutes twice. It stops after 3 failures in a row or when X keeps rate limiting.
 - Each result is saved right away, so you can stop it with Ctrl-C at any time.
 

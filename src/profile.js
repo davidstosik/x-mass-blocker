@@ -10,11 +10,11 @@ import { isUserId } from "./user-id.js";
  *   ready, already_blocked, not_found, suspended, unavailable, mismatch,
  *   rate_limited, error (temporary), logged_out.
  */
-export async function inspectProfile(page, handle) {
+export async function inspectProfile(page, handle, { requireVerifiedState = false } = {}) {
   let lookup = null;
   const onResponse = async (response) => {
     const url = new URL(response.url());
-    // Match the path only: X serves the API from both x.com/i/api and api.x.com.
+    if (url.origin !== "https://x.com" && url.origin !== "https://api.x.com") return;
     if (!url.pathname.endsWith("/UserByScreenName") || !isLookupFor(url, handle)) return;
     let body = null;
     try {
@@ -33,7 +33,7 @@ export async function inspectProfile(page, handle) {
     while (Date.now() < deadline) {
       if (isLoginUrl(page.url())) return { status: "logged_out" };
       const rendered = await probe(page);
-      verdict = judgeProfile(handle, lookup, rendered);
+      verdict = judgeProfile(handle, lookup, rendered, { requireVerifiedState });
       const actionable = verdict?.status === "ready" || verdict?.status === "already_blocked";
       // The DOM can be ready before the lookup body arrives. Give it time to supply an ID.
       if (verdict && (!actionable || verdict.userId || (lookup && !isUserId(lookup.userId)))) return verdict;
@@ -54,7 +54,7 @@ export function isLoginUrl(url) {
 /**
  * Reads X's UserByScreenName GraphQL response. Returns null when it tells us nothing, or one of:
  *   {kind: "rate_limited"}, {kind: "not_found"}, {kind: "suspended", reason},
- *   {kind: "unavailable", reason}, {kind: "user", handle, blocked, userId?}
+ *   {kind: "unavailable", reason}, {kind: "user", handle, userId?, blocked, blockingKnown?}
  */
 export function classifyLookup(httpStatus, body) {
   if (httpStatus === 429) return { kind: "rate_limited" };
@@ -71,11 +71,12 @@ export function classifyLookup(httpStatus, body) {
     return { kind: /suspend/i.test(reason) ? "suspended" : "unavailable", reason };
   }
   if (result.__typename === "User") {
+    const blocking = result.relationship_perspectives?.blocking ?? result.legacy?.blocking;
     return {
       kind: "user",
       handle: result.core?.screen_name ?? result.legacy?.screen_name ?? null,
-      blocked: Boolean(result.relationship_perspectives?.blocking ?? result.legacy?.blocking),
-      ...(isUserId(result.rest_id) ? { userId: result.rest_id } : {}),
+      blocked: Boolean(blocking),
+      ...(isUserId(result.rest_id) ? { userId: result.rest_id, blockingKnown: typeof blocking === "boolean" } : {}),
     };
   }
   return null;
@@ -115,9 +116,12 @@ export function probeProfilePage() {
 }
 
 /** Combines the API lookup and the page probe into a verdict for `target`, or null to keep waiting. */
-export function judgeProfile(target, lookup, page) {
-  const isTarget = (handle) => handle.toLowerCase() === target.toLowerCase();
+export function judgeProfile(target, lookup, page, { requireVerifiedState = false } = {}) {
+  const isTarget = (handle) => typeof handle === "string" && handle.toLowerCase() === target.toLowerCase();
   const mismatch = (handle) => ({ status: "mismatch", note: `profile shows @${handle}` });
+
+  const verified = lookup?.kind === "user" && isTarget(lookup.handle) &&
+    isUserId(lookup.userId) && lookup.blockingKnown;
 
   switch (lookup?.kind) {
     case "rate_limited":
@@ -128,17 +132,26 @@ export function judgeProfile(target, lookup, page) {
     case "unavailable":
       return { status: "unavailable", note: lookup.reason || undefined };
     case "user":
-      if (lookup.handle && !isTarget(lookup.handle)) return mismatch(lookup.handle);
-      if (lookup.blocked && page?.kind !== "profile") return { status: "already_blocked" };
+      if (typeof lookup.handle === "string" && lookup.handle && !isTarget(lookup.handle)) return mismatch(lookup.handle);
+      if (requireVerifiedState && isTarget(lookup.handle) && !isUserId(lookup.userId)) {
+        return { status: "mismatch", note: "could not verify X user ID" };
+      }
+      if (requireVerifiedState && verified && lookup.blocked) {
+        return { status: "already_blocked", userId: lookup.userId };
+      }
+      if (!requireVerifiedState && lookup.blocked && page?.kind !== "profile") {
+        return { status: "already_blocked", ...(isTarget(lookup.handle) && lookup.userId ? { userId: lookup.userId } : {}) };
+      }
   }
 
   switch (page?.kind) {
     case "profile":
       if (!page.handle) return null;
       if (!isTarget(page.handle)) return mismatch(page.handle);
+      if (requireVerifiedState) return verified ? { status: "ready", userId: lookup.userId } : null;
       return {
         status: page.blocked || (lookup?.kind === "user" && lookup.blocked) ? "already_blocked" : "ready",
-        ...(lookup?.handle && isUserId(lookup.userId) ? { userId: lookup.userId } : {}),
+        ...(isTarget(lookup?.handle) && isUserId(lookup.userId) ? { userId: lookup.userId } : {}),
       };
     case "suspended":
     case "not_found":

@@ -148,14 +148,18 @@ class Runner {
   /** One account, retrying temporary errors (30s, 15 min, 15 min) before giving up. */
   async #visit({ handle, unblock, expectedUserId }) {
     let actionUserId;
+    let awaitingConfirmation = false;
     for (let attempt = 0; ; attempt++) {
       const outcome = await this.#attempt(handle, unblock, expectedUserId ?? actionUserId);
-      if (outcome.actionSent) actionUserId = outcome.userId ?? null;
+      if (outcome.actionSent) {
+        actionUserId = outcome.userId;
+        awaitingConfirmation = outcome.awaitingConfirmation === true;
+      }
 
       if (!TEMPORARY.has(outcome.status)) {
         // An earlier attempt clicked but couldn't confirm it, and this one finds it done: it went through.
         const echo = unblock ? "not_blocked" : "already_blocked";
-        if (actionUserId !== undefined && outcome.status === echo) {
+        if (awaitingConfirmation && outcome.status === echo) {
           return { status: unblock ? "unblocked" : "blocked", note: "confirmed on retry", userId: actionUserId };
         }
         return outcome.status === "unblocked" ? { ...outcome, note: "no longer on the list" } : outcome;
@@ -176,7 +180,7 @@ class Runner {
   async #attempt(handle, unblock, expectedUserId) {
     try {
       await this.#ensurePage();
-      const verdict = await inspectProfile(this.#page, handle);
+      const verdict = await inspectProfile(this.#page, handle, { requireVerifiedState: !this.dryRun });
       if (verdict.status === "logged_out") throw notLoggedIn();
       if ((unblock || expectedUserId !== undefined) &&
           (verdict.status === "ready" || verdict.status === "already_blocked")) {
@@ -189,9 +193,7 @@ class Runner {
       } else if (verdict.status !== "ready") {
         return verdict;
       }
-      const outcome = await toggleBlock(this.#page, handle, { unblock, dryRun: this.dryRun });
-      if (outcome.actionSent) return { ...outcome, userId: verdict.userId };
-      return outcome;
+      return await toggleBlock(this.#page, handle, { unblock, dryRun: this.dryRun, userId: verdict.userId });
     } catch (error) {
       if (error instanceof NotLoggedInError || error instanceof AccountIdentityError ||
           error instanceof AccountVerificationRateLimitError) throw error;
@@ -249,7 +251,7 @@ class Runner {
  * Blocks (or unblocks) the profile open in `page` through its ··· menu, after checking the menu
  * names the right handle. In a dry run, it only opens the menu and checks it.
  */
-async function toggleBlock(page, handle, { unblock, dryRun }) {
+async function toggleBlock(page, handle, { unblock, dryRun, userId }) {
   await page.locator('[data-testid="userActions"]').first().click();
   const menu = page.locator('[role="menu"]');
   const item = menu
@@ -264,45 +266,52 @@ async function toggleBlock(page, handle, { unblock, dryRun }) {
     return closeMenu(page, { status: "mismatch", note: `menu reads "${text}"` });
   }
   const isBlocked = (await item.getAttribute("data-testid")) === "unblock" || /^unblock/i.test(text);
-  if (!unblock && isBlocked) return closeMenu(page, { status: "already_blocked" });
-  if (unblock && !isBlocked) return closeMenu(page, { status: "not_blocked" });
+  if (isBlocked !== unblock) {
+    if (dryRun) return closeMenu(page, { status: isBlocked ? "already_blocked" : "not_blocked" });
+    return closeMenu(page, { status: "error", note: "menu disagrees with the verified block state" });
+  }
   if (dryRun) return closeMenu(page, { status: unblock ? "would_unblock" : "would_block" });
 
-  const endpoint = unblock ? "/blocks/destroy" : "/blocks/create";
-  const response = page.waitForResponse((r) => new URL(r.url()).pathname.includes(endpoint), {
-    timeout: TIMING.confirmTimeout + 5000,
-  });
-  response.catch(() => {}); // handled below; this only avoids an unhandled rejection
+  const action = unblock ? "destroy" : "create";
+  const response = page.waitForResponse(
+    (candidate) => matchesActionResponse(candidate, action, userId),
+    { timeout: TIMING.confirmTimeout + 5000 },
+  ).catch(() => null);
+
   await item.click();
   // X always asks to confirm a block. An unblock may go through without asking.
   const confirm = page.locator('[data-testid="confirmationSheetConfirm"]');
-  if (unblock) await confirm.click({ timeout: 3000 }).catch(() => {});
-  else await confirm.click({ timeout: 5000 });
-  return { ...(await confirmation(page, response, { unblock })), actionSent: true };
+  await confirm.click({ timeout: unblock ? 3000 : 5000 }).catch(() => {});
+
+  const sent = { actionSent: true, userId };
+  const result = await response;
+  if (!result) {
+    return { ...sent, status: "error", note: "no matching block action response from X", awaitingConfirmation: true };
+  }
+  const status = result.status();
+  if (!result.ok()) {
+    return {
+      ...sent,
+      status: status === 429 ? "rate_limited" : "error",
+      note: `blocks/${action} returned HTTP ${status}`,
+    };
+  }
+
+  const body = await result.json().catch(() => null);
+  const confirmedHandle = typeof body?.screen_name === "string" ? body.screen_name.toLowerCase() : null;
+  if (body?.id_str !== userId || confirmedHandle !== handle.toLowerCase()) {
+    return { ...sent, status: "error", note: `blocks/${action} did not confirm @${handle}` };
+  }
+  return { ...sent, status: unblock ? "unblocked" : "blocked" };
 }
 
-/**
- * Success is a 2xx from X's API, or the profile's button changing within 10s:
- * "Blocked" (…-unblock) after a block, "Follow" (…-follow) after an unblock.
- */
-async function confirmation(page, responsePromise, { unblock }) {
-  const done = unblock ? "unblocked" : "blocked";
-  const fromApi = responsePromise.then((response) => {
-    if (response.ok()) return { status: done };
-    const note = `${unblock ? "blocks/destroy" : "blocks/create"} returned HTTP ${response.status()}`;
-    return { status: response.status() === 429 ? "rate_limited" : "error", note };
-  });
-  const button = unblock ? '[data-testid$="-follow"]' : '[data-testid$="-unblock"]';
-  const fromPage = page
-    .locator(`[data-testid="primaryColumn"] ${button}`)
-    .first()
-    .waitFor({ timeout: TIMING.confirmTimeout })
-    .then(() => ({ status: done }));
-  try {
-    return await Promise.any([fromApi, fromPage]);
-  } catch {
-    return { status: "error", note: `${unblock ? "unblock" : "block"} not confirmed within 10s` };
-  }
+function matchesActionResponse(response, action, userId) {
+  const url = new URL(response.url());
+  if (url.origin !== "https://x.com" || url.pathname !== `/i/api/1.1/blocks/${action}.json`) return false;
+  const request = response.request();
+  if (request.method() !== "POST") return false;
+  const ids = new URLSearchParams(request.postData()).getAll("user_id");
+  return ids.length === 1 && ids[0] === userId;
 }
 
 async function closeMenu(page, outcome) {

@@ -30,6 +30,8 @@ Options for run:
   --json                 Print the summary as JSON on stdout (progress always goes to stderr)
 
 Run verifies the signed-in X account before using its history, even with no tasks queued.
+Blocks and unblocks are recorded only after X confirms the action for the verified target
+or a retry verifies the target’s new state after a missing reply.
 
 Exit codes: 0 done, 1 error, 2 stopped early (run again later), 3 not logged in.
 Session and results are kept in ${paths.dir}

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { XBrowser } from "../src/browser.js";
-import { TIMING } from "../src/config.js";
+import { DAY, TIMING } from "../src/config.js";
 import { ResultLog } from "../src/results.js";
 import { run } from "../src/runner.js";
 
@@ -23,6 +23,18 @@ function lookup(handle, userId, { status = 200, blocked = false, shown = handle 
         relationship_perspectives: { blocking: blocked },
       } } },
     }),
+  };
+}
+
+
+function actionResponse({ action, handle, userId, url = `https://x.com/i/api/1.1/blocks/${action}.json`,
+  method = "POST", status = 200, bodyId = userId }) {
+  return {
+    url: () => url,
+    request: () => ({ method: () => method, postData: () => `user_id=${userId}` }),
+    status: () => status,
+    ok: () => status === 200,
+    json: async () => ({ id_str: bodyId, screen_name: handle }),
   };
 }
 
@@ -83,7 +95,7 @@ async function fixture(t, { blocked = true, initialVerification, recovery = [] }
         }),
         waitForResponse: (predicate) => new Promise((resolve) => {
           if (location === "https://x.com/target") {
-            const response = { url: () => "https://x.com/i/api/1.1/blocks/create.json", ok: () => true };
+            const response = actionResponse({ action: "create", handle: "target", userId: "42" });
             assert.ok(predicate(response));
             resolve(response);
             return;
@@ -224,7 +236,9 @@ class ProfileFixture extends EventEmitter {
   async waitForResponse(predicate) {
     const identity = lookup("signed_in", A);
     if (predicate(identity)) return identity;
-    return { ok: () => true };
+    const response = actionResponse({ action: this.blocked ? "destroy" : "create", handle: "alice", userId: this.userId });
+    assert.ok(predicate(response));
+    return response;
   }
 }
 
@@ -330,4 +344,205 @@ test("a successful lookup for the wrong handle on a replacement page is fatal", 
   await assert.rejects(f.run(), /Could not verify the signed-in X account ID/);
   assert.equal(f.verified.length, 2);
   assert.deepEqual(f.visited, []);
+});
+
+const handle = "fixture_target";
+const userId = "123456789";
+
+class FixturePage extends EventEmitter {
+  actionRequests = 0;
+  optimistic = false;
+
+  constructor({ unblock, status, overrides, missingReply, applyAction, retryUserId }) {
+    super();
+    this.unblock = unblock;
+    this.blocked = unblock;
+    this.missingReply = missingReply;
+    this.applyAction = applyAction;
+    this.retryUserId = retryUserId;
+    this.status = status;
+    this.overrides = overrides;
+  }
+
+  async goto(url) {
+    this.currentUrl = url;
+    if (url === "https://x.com/home" || url === "https://x.com/signed_in") return;
+    assert.equal(url, `https://x.com/${handle}`);
+    this.emit("response", lookup(handle, this.actionRequests ? this.retryUserId ?? userId : userId, { blocked: this.blocked }));
+  }
+
+  url() { return this.currentUrl; }
+  isClosed() { return false; }
+  context() { return { cookies: async () => [{ name: "auth_token", value: "fixture" }] }; }
+  async evaluate() {
+    return { kind: "profile", handle, blocked: this.optimistic ? !this.unblock : this.unblock };
+  }
+
+  locator(selector) {
+    if (selector === '[data-testid="AppTabBar_Profile_Link"]') return { getAttribute: async () => "/signed_in" };
+    const menuItem = {
+      or: () => menuItem,
+      first: () => menuItem,
+      waitFor: async () => {},
+      innerText: async () => `${this.unblock ? "Unblock" : "Block"} @${handle}`,
+      getAttribute: async () => this.unblock ? "unblock" : "block",
+      click: async () => {},
+    };
+    if (selector === '[role="menu"]') return { locator: () => menuItem, getByRole: () => menuItem };
+    if (selector === '[data-testid="userActions"]') return { first: () => ({ click: async () => {} }) };
+    if (selector === '[data-testid="loginButton"]') return { count: async () => 0 };
+    if (selector.includes("SideNav_AccountSwitcher_Button")) return { count: async () => 1 };
+    if (selector === '[data-testid="confirmationSheetConfirm"]') return { click: async () => this.respond() };
+    if (selector.includes('data-testid$="-follow"')) {
+      // An unrelated Follow button is already visible in the primary column.
+      return { first: () => ({ waitFor: async () => {} }) };
+    }
+    throw new Error(`Unexpected selector: ${selector}`);
+  }
+
+  waitForResponse(matches) {
+    const identity = lookup("signed_in", A);
+    if (matches(identity)) return Promise.resolve(identity);
+    return new Promise((resolve, reject) => {
+      this.deliver = (responses) => {
+        const response = responses.find(matches);
+        if (response) resolve(response);
+        else reject(new Error("No matching fixture response"));
+      };
+    });
+  }
+
+  respond() {
+    this.actionRequests++;
+    this.lastRequestAt = performance.now();
+    this.optimistic = true;
+    const action = this.unblock ? "destroy" : "create";
+    const endpoint = `https://x.com/i/api/1.1/blocks/${action}.json`;
+    const response = (options) => actionResponse({ action, handle, userId, ...options });
+    const unrelated = [
+      response({ url: endpoint.replace("x.com", "other.invalid") }),
+      response({ url: `${endpoint}/extra` }),
+      response({ url: endpoint.replace(action, this.unblock ? "create" : "destroy") }),
+      response({ method: "GET" }),
+      response({ userId: "987654321" }),
+    ];
+    const matched = response({ status: this.status, ...this.overrides });
+    if (this.applyAction) this.blocked = !this.unblock;
+    this.deliver(this.missingReply ? unrelated : [...unrelated, matched]);
+  }
+}
+
+async function runFixture(t, { onProgress, ...options }) {
+  const { unblock } = options;
+  const dir = await mkdtemp(path.join(tmpdir(), "x-mass-blocker-runner-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const paths = { session: path.join(dir, "session.json"), results: path.join(dir, "results.jsonl") };
+  const list = path.join(dir, "list.txt");
+  await writeFile(paths.session, JSON.stringify({ cookies: [{ name: "auth_token", value: "fixture" }] }));
+  await writeFile(list, unblock ? "still_on_list\n" : `${handle}\n`);
+  const initial = await ResultLog.load(paths.results, A);
+  if (unblock) await initial.record(handle, "blocked", { list, userId });
+
+  const page = new FixturePage(options);
+  t.mock.method(XBrowser, "start", async () => ({
+    isConnected: true,
+    newPage: async () => page,
+    close: async () => {},
+  }));
+  const originalTiming = { ...TIMING };
+  Object.assign(TIMING, { retryDelays: [0], rateLimitWait: 1000 });
+  t.after(() => Object.assign(TIMING, originalTiming));
+
+  const result = await run({
+    paths, list, unblock, limit: 1, dailyCap: 2, dryRun: false,
+    progress: (message) => onProgress?.(message, page),
+  });
+  return { result, log: await ResultLog.load(paths.results, A), list, page };
+}
+
+test("matched unblock HTTP 429 backs off and leaves the target eligible", async (t) => {
+  let backoffStarted;
+  const { result, log, list, page } = await runFixture(t, {
+    unblock: true,
+    status: 429,
+    onProgress(message, page) {
+      if (!message.includes("Retrying")) return;
+      assert.match(message, /blocks\/destroy returned HTTP 429\. Retrying in 1s/);
+      assert.equal(page.actionRequests, 1);
+      backoffStarted = performance.now();
+    },
+  });
+  assert.ok(page.lastRequestAt - backoffStarted >= 950);
+  assert.equal(page.actionRequests, 2);
+  assert.equal(result.stopped, "rate_limited");
+  assert.deepEqual(result.byStatus, { failed: 1 });
+  assert.equal(log.latest(handle).status, "failed");
+  assert.equal(log.lastAction(handle).status, "blocked");
+  assert.equal(log.countActionsSince(Date.now() - DAY), 1);
+  assert.deepEqual(log.pardoned(list, ["still_on_list"]).map(({ username }) => username), [handle]);
+});
+
+for (const unblock of [false, true]) {
+  const action = unblock ? "unblocked" : "blocked";
+  test(`records ${action} when X confirms the verified target`, async (t) => {
+    const { result, log } = await runFixture(t, { unblock, status: 200 });
+    assert.deepEqual(result.byStatus, { [action]: 1 });
+    assert.equal(log.lastAction(handle).status, action);
+  });
+}
+
+test("a matched HTTP 500 cannot be turned into success by the page", async (t) => {
+  const { result, log } = await runFixture(t, { unblock: false, status: 500 });
+  assert.deepEqual(result.byStatus, { failed: 1 });
+  assert.match(log.latest(handle).note, /HTTP 500/);
+  assert.equal(log.isDone(handle), false);
+});
+
+test("a successful response with the wrong account in its body is unconfirmed", async (t) => {
+  const { result, log } = await runFixture(t, { unblock: false, status: 200, overrides: { bodyId: "987654321" } });
+  assert.deepEqual(result.byStatus, { failed: 1 });
+  assert.match(log.latest(handle).note, /did not confirm/);
+});
+
+test("unrelated responses and an optimistic page cannot confirm a missing response", async (t) => {
+  const { result, log } = await runFixture(t, { unblock: false, status: 200, overrides: { userId: "987654321" } });
+  assert.deepEqual(result.byStatus, { failed: 1 });
+  assert.match(log.latest(handle).note, /no matching block action response/);
+});
+
+for (const unblock of [false, true]) {
+  const action = unblock ? "unblocked" : "blocked";
+  test(`records ${action} when a retry verifies the state after a missing reply`, async (t) => {
+    const progress = [];
+    const { result, log, list, page } = await runFixture(t, {
+      unblock,
+      missingReply: true,
+      applyAction: true,
+      onProgress: (message) => progress.push(message),
+    });
+    assert.ok(progress.some((message) => /no matching block action response from X\. Retrying/.test(message)));
+    assert.equal(page.actionRequests, 1);
+    assert.deepEqual(result.byStatus, { [action]: 1 });
+    assert.equal(log.lastAction(handle).status, action);
+    assert.equal(log.lastAction(handle).note, "confirmed on retry");
+    assert.equal(log.lastAction(handle).userId, userId);
+    assert.equal(log.countActionsSince(Date.now() - DAY), unblock ? 2 : 1);
+    if (unblock) assert.deepEqual(log.pardoned(list, ["still_on_list"]), []);
+  });
+}
+
+test("a retry cannot confirm the action from a different X user ID", async (t) => {
+  const { result, log, page } = await runFixture(t, {
+    unblock: false, missingReply: true, applyAction: true, retryUserId: "987654321",
+  });
+  assert.equal(page.actionRequests, 1);
+  assert.deepEqual(result.byStatus, { mismatch: 1 });
+  assert.equal(log.countActionsSince(Date.now() - DAY), 0);
+});
+
+test("an explicit HTTP failure cannot be credited on retry", async (t) => {
+  const { result, log, page } = await runFixture(t, { unblock: false, status: 500, applyAction: true });
+  assert.equal(page.actionRequests, 1);
+  assert.deepEqual(result.byStatus, { already_blocked: 1 });
+  assert.equal(log.countActionsSince(Date.now() - DAY), 0);
 });
