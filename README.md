@@ -1,6 +1,8 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
-
 # x-mass-blocker
+
+![Santa crossing robot accounts off his naughty list, next to the x-mass-blocker icon](assets/banner.jpg)
+
+**Santa's naughty list for AI reply guys.**
 
 Blocks every X account on [levels.io's "blocked for AI reply" list](https://blockedforaireply.levels.io) from your own account, using the Google Chrome already installed on your computer.
 
