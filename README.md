@@ -6,7 +6,7 @@
 
 Blocks every X account on [levels.io's "blocked for AI reply" list](https://blockedforaireply.levels.io) from your own account, using the Google Chrome already installed on your computer.
 
-The site offers a prompt for AI browser agents that visits about 3,700 profiles and blocks them one by one. Done by an LLM, that costs tens of millions of tokens per run. This script does the same clicks for free, remembers where it left off, stays under a daily cap, and unblocks accounts that were taken off the list after an appeal.
+The site offers a prompt for AI browser agents that visits about 3,700 profiles and blocks them one by one. Done by an LLM, that costs tens of millions of tokens per run. This script does the same clicks for free, at the pace that prompt asks for. It remembers where it left off and unblocks accounts that were taken off the list after an appeal.
 
 ## Quick start
 
@@ -19,7 +19,7 @@ npx github:davidstosik/x-mass-blocker login
 # 2. Dry run: open the Block menu of 5 accounts, block nothing
 npx github:davidstosik/x-mass-blocker run --dry-run -n 5 --headed
 
-# 3. Block for real (up to 400 accounts a day by default)
+# 3. Block for real
 npx github:davidstosik/x-mass-blocker run
 
 # 4. When you're done, log that session out of X
@@ -29,7 +29,13 @@ npx github:davidstosik/x-mass-blocker logout
 > [!IMPORTANT]
 > This is v1, tested on a single account with a sample of 20 blocks and 2 unblocks. X changes its pages often, so do the dry run first and watch it.
 
-At 400 blocks a day, the whole list takes about 10 runs. Each run picks up where the last one stopped.
+It blocks about one account every 5 seconds, the pace the site's prompt asks for, so the whole list takes about 5 hours. Stop it with Ctrl-C whenever you like: the next run picks up where it stopped.
+
+To go easier on your account, cap it at 400 blocks a day and run it once a day for about 10 days:
+
+```sh
+npx github:davidstosik/x-mass-blocker run --daily-cap 400
+```
 
 ## For AI agents
 
@@ -37,8 +43,9 @@ Paste this into Claude Code, Codex or any agent that can run commands:
 
 ```text
 Run `npx github:davidstosik/x-mass-blocker login` and wait for me to log in.
-Then run `npx github:davidstosik/x-mass-blocker run --json` and report the summary.
-If it exits with code 2, tell me to run it again tomorrow.
+Then run `npx github:davidstosik/x-mass-blocker run --json` in the background (it can take hours) and report the summary.
+If something kills it before it exits, run it again: it picks up where it stopped.
+If it exits with code 2, tell me to run it again later.
 If it exits with code 3, ask me to log in again.
 ```
 
@@ -58,7 +65,7 @@ Options for `run`:
 | --- | --- | --- |
 | `--dry-run` | | Open each menu and check it, then press Escape. Nothing is blocked, unblocked or recorded. |
 | `-n, --limit N` | all | Visit at most N accounts this run. |
-| `--daily-cap N` | 400 | Stop once N accounts were blocked or unblocked in the last 24 hours. |
+| `--daily-cap N` | none | Stop once N accounts were blocked or unblocked in the last 24 hours. |
 | `--headed` | | Show the browser window. |
 | `--list URL\|FILE` | levels.io list | Use another list, one username per line. |
 | `--recheck` | | Visit accounts again even if a previous run settled them. |
@@ -99,7 +106,7 @@ The script only talks to X and to the list's URL.
 
 ## Caveats
 
-- **Automating x.com is against X's terms of service.** The risk falls on your account. The defaults are cautious, but X doesn't publish its limits, so 400 a day is a guess.
+- **Automating x.com is against X's terms of service.** The risk falls on your account. X doesn't publish its limits: the script follows the pace the site's prompt asks for and backs off when X rate limits it, but nobody knows how many blocks a day X tolerates. If you'd rather not find out, use `--daily-cap`.
 - The text fallbacks assume X is displayed in English. The script asks for English, but your account's language setting may win.
 - Usernames can change hands: the account you block may not be the one that was put on the list.
 - If you log in with Google or Apple, those sign-ins may refuse an automated browser. Use your username and password, or `login --paste`.

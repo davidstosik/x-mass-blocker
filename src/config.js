@@ -3,9 +3,6 @@ import path from "node:path";
 
 export const DEFAULT_LIST_URL = "https://blockedforaireply.levels.io/api/usernames.txt";
 
-/** X doesn't publish its limits. 400 blocks and unblocks a day is a cautious guess. */
-export const DEFAULT_DAILY_CAP = 400;
-
 /**
  * levels.io doesn't publish pardons: a pardoned handle just disappears from the list. So a broken
  * or cut-off download would look like a mass pardon. Unblock at most this many at once unless told to.
@@ -23,6 +20,11 @@ const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 export const DAY = 24 * 60 * MINUTE;
 
+/**
+ * X doesn't publish its limits, so the pace is the one the prompt on blockedforaireply.levels.io
+ * asks for: about one block every 3 to 5 seconds, and a 15-minute wait when X rate limits.
+ * There's no daily cap unless --daily-cap sets one.
+ */
 export const TIMING = {
   loginTimeout: 10 * MINUTE,
   loginCookieSettle: 3 * SECOND, // X rotates ct0 right after login

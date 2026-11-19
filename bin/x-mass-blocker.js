@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { DAY, DEFAULT_DAILY_CAP, DEFAULT_LIST_URL, EXIT, statePaths } from "../src/config.js";
+import { DAY, DEFAULT_LIST_URL, EXIT, statePaths } from "../src/config.js";
 import { CliError } from "../src/errors.js";
 import { login, loginWithPastedCookies, logout } from "../src/login.js";
 import { ResultLog } from "../src/results.js";
@@ -20,7 +20,8 @@ Options for login:
 Options for run:
   --dry-run              Open each menu and check it, but never block, unblock or record anything
   -n, --limit N          Visit at most N accounts this run
-  --daily-cap N          Stop once N accounts were blocked or unblocked in the last 24 hours (default: ${DEFAULT_DAILY_CAP})
+  --daily-cap N          Stop once N accounts were blocked or unblocked in the last 24 hours
+                         (default: no cap; --daily-cap 400 spreads the list over about 10 days)
   --headed               Show the browser window
   --list URL|FILE        Use another list (default: ${DEFAULT_LIST_URL})
   --recheck              Visit accounts again even if a previous run already settled them
@@ -70,7 +71,7 @@ async function runCommand(args, paths) {
     paths,
     list: options.list ?? DEFAULT_LIST_URL,
     limit: positiveInteger(options.limit, "--limit"),
-    dailyCap: positiveInteger(options["daily-cap"], "--daily-cap") ?? DEFAULT_DAILY_CAP,
+    dailyCap: positiveInteger(options["daily-cap"], "--daily-cap") ?? null,
     dryRun: Boolean(options["dry-run"]),
     headed: Boolean(options.headed),
     recheck: Boolean(options.recheck),

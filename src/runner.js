@@ -191,7 +191,8 @@ class Runner {
   }
 
   #dailyCapReached() {
-    return !this.dryRun && this.log.countActionsSince(Date.now() - DAY) >= this.dailyCap;
+    if (!this.dailyCap || this.dryRun) return false;
+    return this.log.countActionsSince(Date.now() - DAY) >= this.dailyCap;
   }
 }
 
