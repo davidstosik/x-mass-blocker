@@ -1,9 +1,10 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { XBrowser } from "./browser.js";
+import { readSession, XBrowser } from "./browser.js";
 import { DAY, MASS_UNBLOCK, MAX_FAILURES_IN_A_ROW, TIMING } from "./config.js";
 import { NotLoggedInError } from "./errors.js";
 import { listId, loadList } from "./list.js";
-import { inspectProfile, isLoginUrl } from "./profile.js";
+import { checkLogin } from "./login.js";
+import { inspectProfile } from "./profile.js";
 import { ResultLog } from "./results.js";
 
 const TEMPORARY = new Set(["rate_limited", "error"]);
@@ -173,7 +174,8 @@ class Runner {
   async #ensurePage() {
     if (!this.#browser?.isConnected) {
       await this.#browser?.close();
-      this.#browser = await XBrowser.start({ sessionFile: this.sessionFile, headed: this.headed });
+      const storageState = await readSession(this.sessionFile);
+      this.#browser = await XBrowser.start({ storageState, headed: this.headed });
       this.#page = null;
     }
     if (!this.#page || this.#page.isClosed()) this.#page = await this.#browser.newPage();
@@ -191,25 +193,6 @@ class Runner {
   #dailyCapReached() {
     return !this.dryRun && this.log.countActionsSince(Date.now() - DAY) >= this.dailyCap;
   }
-}
-
-/** Resolves to "in", "out", or "unknown" if X showed neither within 30s. */
-async function checkLogin(page) {
-  await page.goto("https://x.com/home", { waitUntil: "domcontentloaded", timeout: TIMING.loginCheckTimeout });
-  const cookies = await page.context().cookies("https://x.com");
-  if (!cookies.some((cookie) => cookie.name === "auth_token")) return "out"; // X deletes it on logout
-
-  const loggedIn = page.locator('[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="AppTabBar_Profile_Link"]');
-  const loggedOut = page.locator('[data-testid="loginButton"]');
-  const deadline = Date.now() + TIMING.loginCheckTimeout;
-  while (Date.now() < deadline) {
-    // Logged out, /home redirects to the landing page or to a login page.
-    if (new URL(page.url()).pathname === "/" || isLoginUrl(page.url())) return "out";
-    if (await isPresent(loggedIn)) return "in";
-    if (await isPresent(loggedOut)) return "out";
-    await sleep(TIMING.pollInterval);
-  }
-  return "unknown";
 }
 
 /**
@@ -283,14 +266,6 @@ async function isVisibleSoon(locator) {
     return true;
   } catch {
     return false;
-  }
-}
-
-async function isPresent(locator) {
-  try {
-    return (await locator.count()) > 0;
-  } catch {
-    return false; // e.g. the page is mid-navigation
   }
 }
 

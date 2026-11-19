@@ -2,7 +2,7 @@
 import { parseArgs } from "node:util";
 import { DAY, DEFAULT_DAILY_CAP, DEFAULT_LIST_URL, EXIT, statePaths } from "../src/config.js";
 import { CliError } from "../src/errors.js";
-import { login, loginWithPastedCookies } from "../src/login.js";
+import { login, loginWithPastedCookies, logout } from "../src/login.js";
 import { ResultLog } from "../src/results.js";
 import { run } from "../src/runner.js";
 
@@ -12,6 +12,7 @@ Usage:
   x-mass-blocker login [--paste]   Log in to X in Chrome and save the session
   x-mass-blocker run [options]     Unblock accounts removed from the list, then block the rest
   x-mass-blocker stats [--json]    Count the results so far
+  x-mass-blocker logout            Log the saved session out of X, then delete it
 
 Options for login:
   --paste                Paste the auth_token and ct0 cookies instead of opening Chrome
@@ -38,6 +39,12 @@ async function loginCommand(args, paths) {
   const { paste } = parse(args, { paste: { type: "boolean" } });
   if (paste) await loginWithPastedCookies(paths.session, progress);
   else await login(paths.session, progress);
+  return EXIT.OK;
+}
+
+async function logoutCommand(args, paths) {
+  parse(args, {});
+  await logout(paths.session, progress);
   return EXIT.OK;
 }
 
@@ -121,7 +128,7 @@ async function statsCommand(args, paths) {
   return EXIT.OK;
 }
 
-const COMMANDS = { login: loginCommand, run: runCommand, stats: statsCommand };
+const COMMANDS = { login: loginCommand, run: runCommand, stats: statsCommand, logout: logoutCommand };
 
 async function main(argv) {
   const [command, ...args] = argv;

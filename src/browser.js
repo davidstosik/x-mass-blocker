@@ -66,8 +66,8 @@ export class XBrowser {
     this.#context = context;
   }
 
-  static async start({ sessionFile, headed = false }) {
-    const storageState = await readSession(sessionFile);
+  /** `storageState` is a session read with readSession. */
+  static async start({ storageState, headed = false }) {
     const browser = await launchChrome({
       headless: !headed,
       args: ["--blink-settings=imagesEnabled=false"],

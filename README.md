@@ -21,6 +21,9 @@ npx github:davidstosik/x-mass-blocker run --dry-run -n 5 --headed
 
 # 3. Block for real (up to 400 accounts a day by default)
 npx github:davidstosik/x-mass-blocker run
+
+# 4. When you're done, log that session out of X
+npx github:davidstosik/x-mass-blocker logout
 ```
 
 > [!IMPORTANT]
@@ -47,6 +50,7 @@ If it exits with code 3, ask me to log in again.
 | `login --paste` | Asks for the `auth_token` and `ct0` cookies (copied from a logged-in browser) instead. |
 | `run` | Unblocks accounts removed from the list, then blocks the rest. |
 | `stats [--json]` | Counts the results so far. |
+| `logout` | Logs the saved session out of X, checks that X no longer accepts it, then deletes it. |
 
 Options for `run`:
 
@@ -83,7 +87,7 @@ A broken or cut-off download would look like a mass pardon. So if more than 10 a
 
 Everything lives in `~/.config/x-mass-blocker/` (or `$XDG_CONFIG_HOME/x-mass-blocker/`, or `$X_MASS_BLOCKER_HOME`):
 
-- `session.json` holds your X session cookies. **Anyone with this file can use your X account.** It's readable only by you (`chmod 600`). To revoke it, delete the file and log the session out in X's settings (Security and account access > Apps and sessions).
+- `session.json` holds your X session cookies. **Anyone with this file can use your X account.** It's readable only by you (`chmod 600`). To revoke it, run `logout`. Deleting the file yourself isn't enough: a copy of it would keep working until the session is logged out. You can also end the session in X's settings (Security and account access > Apps and sessions).
 - `results.jsonl` is the record of every run. Lines are only ever added, one per visit, so an account's history stays readable:
   ```jsonl
   {"username":"example","status":"blocked","list":"https://blockedforaireply.levels.io/api/usernames.txt","at":"2026-11-20T09:42:03.551Z"}

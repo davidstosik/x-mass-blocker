@@ -1,11 +1,14 @@
+import { rm } from "node:fs/promises";
 import readline from "node:readline";
 import { Writable } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
-import { launchChrome, saveSession } from "./browser.js";
+import { launchChrome, readSession, saveSession, XBrowser } from "./browser.js";
 import { TIMING } from "./config.js";
-import { CliError } from "./errors.js";
+import { CliError, NotLoggedInError } from "./errors.js";
+import { isLoginUrl } from "./profile.js";
 
 const LOGIN_URL = "https://x.com/i/flow/login";
+const LOGOUT_URL = "https://x.com/logout";
 const AUTH_COOKIES = ["auth_token", "ct0"];
 
 /** Opens a visible Chrome window, waits for the user to log in to X, then saves the session. */
@@ -54,6 +57,113 @@ export async function loginWithPastedCookies(sessionFile, progress) {
   });
   await saveSession(sessionFile, { cookies: [cookie("auth_token", true), cookie("ct0", false)], origins: [] });
   progress(`Session saved to ${sessionFile}`);
+}
+
+/**
+ * Logs the saved session out of X, checks that X now turns its cookies away, then deletes the file.
+ * Deleting the file alone revokes nothing: a copy of it keeps working until the session is logged out.
+ */
+export async function logout(sessionFile, progress) {
+  let storageState;
+  try {
+    storageState = await readSession(sessionFile);
+  } catch (error) {
+    if (!(error instanceof NotLoggedInError)) throw error;
+    await rm(sessionFile, { force: true }); // no auth_token in it: nothing to log out
+    progress("No saved session: nothing to log out.");
+    return;
+  }
+
+  progress("Logging the saved session out of X…");
+  let confirmed = false;
+  let trouble = "";
+  try {
+    confirmed = await withPage(storageState, confirmLogout);
+  } catch (error) {
+    trouble = `${error.message.split("\n")[0]}\n`;
+  }
+  // The real test, whatever happened above: a fresh Chrome with the old cookies must not be logged in.
+  const status = await withPage(storageState, checkLogin).catch(() => "unknown");
+  if (status !== "out") {
+    const problem =
+      status === "in" ? "X still accepts the saved session" : "Could not tell whether X still accepts the saved session";
+    throw new CliError(
+      `${trouble}${problem}, so ${sessionFile} was kept. Run \`x-mass-blocker logout\` again, or end the session ` +
+        "in X: Settings > Security and account access > Apps and sessions > Sessions. Then delete the file.",
+    );
+  }
+
+  await rm(sessionFile, { force: true });
+  progress(
+    confirmed
+      ? `Logged out: X no longer accepts the saved session. Deleted ${sessionFile}`
+      : `The saved session was already logged out. Deleted ${sessionFile}`,
+  );
+}
+
+/** Resolves to "in", "out", or "unknown" if X showed neither within 30s. */
+export async function checkLogin(page) {
+  await page.goto("https://x.com/home", { waitUntil: "domcontentloaded", timeout: TIMING.loginCheckTimeout });
+  if (!(await hasCookie(page.context(), "auth_token"))) return "out"; // X deletes it on logout
+
+  const loggedIn = page.locator('[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="AppTabBar_Profile_Link"]');
+  const loggedOut = page.locator('[data-testid="loginButton"]');
+  const deadline = Date.now() + TIMING.loginCheckTimeout;
+  while (Date.now() < deadline) {
+    if (isLoggedOutUrl(page.url())) return "out";
+    if (await isPresent(loggedIn)) return "in";
+    if (await isPresent(loggedOut)) return "out";
+    await sleep(TIMING.pollInterval);
+  }
+  return "unknown";
+}
+
+/**
+ * Opens x.com/logout and confirms X's "Log out of X?" dialog. Resolves to false if X showed no
+ * dialog because the session was already logged out. Whether it worked is checked afterwards.
+ */
+async function confirmLogout(page) {
+  await page.goto(LOGOUT_URL, { waitUntil: "domcontentloaded", timeout: TIMING.loginCheckTimeout });
+  const confirm = page.locator('[data-testid="confirmationSheetConfirm"]');
+  const deadline = Date.now() + TIMING.loginCheckTimeout;
+  while (!(await isPresent(confirm))) {
+    if (isLoggedOutUrl(page.url())) return false;
+    if (Date.now() > deadline) throw new CliError("X didn't show its \"Log out\" dialog within 30s.");
+    await sleep(TIMING.pollInterval);
+  }
+  await confirm.click();
+  // X deletes the auth_token cookie once it has logged the session out. Give it time before closing.
+  const settled = Date.now() + TIMING.loginCheckTimeout;
+  while ((await hasCookie(page.context(), "auth_token")) && Date.now() < settled) await sleep(TIMING.pollInterval);
+  return true;
+}
+
+/** Runs `fn` on a page of a headless Chrome holding `storageState`, then closes that Chrome. */
+async function withPage(storageState, fn) {
+  const browser = await XBrowser.start({ storageState });
+  try {
+    return await fn(await browser.newPage());
+  } finally {
+    await browser.close();
+  }
+}
+
+/** Logged out, X sends pages that need an account to the landing page or to a login page. */
+function isLoggedOutUrl(url) {
+  return new URL(url).pathname === "/" || isLoginUrl(url);
+}
+
+async function hasCookie(context, name) {
+  const cookies = await context.cookies("https://x.com");
+  return cookies.some((cookie) => cookie.name === name && cookie.value);
+}
+
+async function isPresent(locator) {
+  try {
+    return (await locator.count()) > 0;
+  } catch {
+    return false; // e.g. the page is mid-navigation
+  }
 }
 
 async function hasAuthCookies(context) {
