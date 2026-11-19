@@ -1,3 +1,5 @@
+*Yes, the banner is AI-generated, and so is this tool. Unlike AI replies, you don't have to look at them all day.*
+
 # x-mass-blocker
 
 ![Santa crossing robot accounts off his naughty list, next to the x-mass-blocker icon](assets/banner.jpg)
@@ -152,8 +154,6 @@ The script only talks to X and to the list's URL.
 ## Credits
 
 The list is curated by [Pieter Levels (@levelsio)](https://x.com/levelsio) at [blockedforaireply.levels.io](https://blockedforaireply.levels.io). This project isn't affiliated with X or with levels.io.
-
-Yes, the banner is AI-generated, and so is this tool. Unlike AI replies, you don't have to look at them all day.
 
 ## License
 
