@@ -1,0 +1,32 @@
+{
+  "name": "x-mass-blocker",
+  "version": "0.1.0",
+  "description": "Block every X account on levels.io's \"blocked for AI reply\" list, using your own Chrome.",
+  "keywords": [
+    "x",
+    "twitter",
+    "block",
+    "ai",
+    "playwright"
+  ],
+  "license": "MIT",
+  "author": "David Stosik",
+  "repository": "github:davidstosik/x-mass-blocker",
+  "type": "module",
+  "bin": {
+    "x-mass-blocker": "bin/x-mass-blocker.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "playwright-core": "1.65.0"
+  }
+}

@@ -1,4 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#e11d48"/>
-  <text x="32" y="32" dy="0.35em" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="26" font-weight="600" fill="#ffffff">XM</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="28" fill="#14532D"/>
+  <path d="M39 58 89 108M89 58 39 108" fill="none" stroke="#FFFFFF" stroke-width="22"/>
+  <g stroke="#14532D" stroke-width="4" paint-order="stroke">
+    <path d="M30 48C33 30 42 15 58 10 80 3 102 12 113 34 104 28 95 27 88 30L96 48Z" fill="#E11D2E" stroke-linejoin="round"/>
+    <rect x="24" y="40" width="78" height="17" rx="8.5" fill="#FFFFFF"/>
+    <circle cx="112" cy="37" r="9.5" fill="#FFFFFF"/>
+  </g>
 </svg>
