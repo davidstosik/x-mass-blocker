@@ -1,52 +1,79 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { XBrowser } from "./browser.js";
-import { DAY, MAX_FAILURES_IN_A_ROW, TIMING } from "./config.js";
+import { DAY, MASS_UNBLOCK, MAX_FAILURES_IN_A_ROW, TIMING } from "./config.js";
 import { NotLoggedInError } from "./errors.js";
-import { loadList } from "./list.js";
+import { listId, loadList } from "./list.js";
 import { inspectProfile, isLoginUrl } from "./profile.js";
 import { ResultLog } from "./results.js";
 
 const TEMPORARY = new Set(["rate_limited", "error"]);
+const ACTED = new Set(["blocked", "unblocked", "would_block", "would_unblock"]);
 
 const STOP_MESSAGES = {
-  daily_cap: (cap) => `Daily cap reached (${cap} blocks in the last 24 hours).`,
+  daily_cap: (cap) => `Daily cap reached (${cap} blocks and unblocks in the last 24 hours).`,
   rate_limited: () => "X keeps rate limiting this account.",
   too_many_failures: () => `${MAX_FAILURES_IN_A_ROW} accounts failed in a row.`,
 };
 
 /**
- * Visits every handle on the list that isn't done yet and blocks it.
- * Each result is appended to the log right away, so stopping at any point loses nothing.
+ * Unblocks the accounts it blocked that were removed from the list (pardoned), then blocks
+ * every account on the list that isn't done yet. Each result is appended to the log right
+ * away, so stopping at any point loses nothing.
  */
-export async function run({ paths, list, limit, dailyCap, dryRun, headed, recheck, progress }) {
+export async function run({ paths, list, limit, dailyCap, dryRun, headed, recheck, unblock, allowMassUnblock, progress }) {
   const log = await ResultLog.load(paths.results);
+  const source = listId(list);
   const handles = await loadList(list);
-  const pending = recheck ? handles : handles.filter((handle) => !log.isDone(handle));
-  const queue = limit ? pending.slice(0, limit) : pending;
+
+  const { toUnblock, heldBack } = unblock
+    ? pardonedAccounts(log, source, handles, { allowMassUnblock, progress })
+    : { toUnblock: [], heldBack: 0 };
+  const toBlock = recheck ? handles : handles.filter((handle) => !log.isDone(handle));
+  const tasks = [
+    ...toUnblock.map((handle) => ({ handle, unblock: true })),
+    ...toBlock.map((handle) => ({ handle, unblock: false })),
+  ];
+  const queue = limit ? tasks.slice(0, limit) : tasks;
   progress(
-    `${handles.length} accounts on the list, ${handles.length - pending.length} already done. ` +
-      `Visiting ${queue.length}${dryRun ? " (dry run: nothing will be blocked)" : ""}.`,
+    `${handles.length} accounts on the list, ${handles.length - toBlock.length} already done` +
+      `${toUnblock.length ? `, ${toUnblock.length} removed since the tool blocked them` : ""}. ` +
+      `Visiting ${queue.length}${dryRun ? " (dry run: nothing will be blocked or unblocked)" : ""}.`,
   );
 
-  const runner = new Runner({ sessionFile: paths.session, log, dailyCap, dryRun, headed, progress });
+  const runner = new Runner({ sessionFile: paths.session, log, list: source, dailyCap, dryRun, headed, progress });
   const stopped = await runner.process(queue);
   if (stopped) progress(`Stopped early: ${STOP_MESSAGES[stopped](dailyCap)} Run again later.`);
 
-  const counts = runner.counts;
-  const blocked = counts.blocked ?? 0;
-  const failed = counts.failed ?? 0;
-  const wouldBlock = counts.would_block ?? 0;
+  const count = (status) => runner.counts[status] ?? 0;
+  const failed = count("failed");
+  const acted = [...ACTED].reduce((sum, status) => sum + count(status), 0);
   return {
     dryRun,
     visited: runner.visited,
-    blocked,
-    ...(dryRun ? { wouldBlock } : {}),
-    skipped: runner.visited - blocked - failed - wouldBlock,
+    blocked: count("blocked"),
+    unblocked: count("unblocked"),
+    ...(dryRun ? { wouldBlock: count("would_block"), wouldUnblock: count("would_unblock") } : {}),
+    skipped: runner.visited - acted - failed,
     failed,
-    byStatus: counts,
+    byStatus: runner.counts,
     remaining: handles.filter((handle) => !log.isDone(handle)).length,
+    ...(heldBack ? { unblockHeldBack: heldBack } : {}),
     stopped,
   };
+}
+
+/** Accounts to unblock, unless so many left the list at once that the download looks broken. */
+function pardonedAccounts(log, source, handles, { allowMassUnblock, progress }) {
+  const pardoned = log.pardoned(source, handles);
+  const expected = Math.max(MASS_UNBLOCK.minimum, Math.ceil(MASS_UNBLOCK.share * log.blockedFrom(source).length));
+  if (pardoned.length <= expected || allowMassUnblock) return { toUnblock: pardoned, heldBack: 0 };
+
+  progress(
+    `${pardoned.length} accounts this tool blocked are no longer on the list, more than the ${expected} expected. ` +
+      "That could be a broken download, so none will be unblocked. " +
+      "If the list really shrank, run again with --allow-mass-unblock.",
+  );
+  return { toUnblock: [], heldBack: pardoned.length };
 }
 
 class Runner {
@@ -55,8 +82,8 @@ class Runner {
   #browser = null;
   #page = null;
 
-  constructor({ sessionFile, log, dailyCap, dryRun, headed, progress }) {
-    Object.assign(this, { sessionFile, log, dailyCap, dryRun, headed, progress });
+  constructor({ sessionFile, log, list, dailyCap, dryRun, headed, progress }) {
+    Object.assign(this, { sessionFile, log, list, dailyCap, dryRun, headed, progress });
   }
 
   /** Returns why it stopped early ("daily_cap", "rate_limited", "too_many_failures"), or null. */
@@ -69,14 +96,16 @@ class Runner {
       if ((await checkLogin(this.#page)) !== "in") throw notLoggedIn();
 
       let failuresInARow = 0;
-      for (const [index, handle] of queue.entries()) {
+      for (const [index, task] of queue.entries()) {
         if (this.#dailyCapReached()) return "daily_cap";
 
-        const { status, note, rateLimited } = await this.#visit(handle);
-        if (!this.dryRun) await this.log.record(handle, status, note);
+        const { status, note, rateLimited } = await this.#visit(task);
+        if (!this.dryRun) await this.log.record(task.handle, status, { note, list: this.list });
         this.counts[status] = (this.counts[status] ?? 0) + 1;
         this.visited++;
-        this.progress(`[${String(index + 1).padStart(String(queue.length).length)}/${queue.length}] @${handle}: ${status.replaceAll("_", " ")}${note ? ` (${note})` : ""}`);
+        const position = `[${String(index + 1).padStart(String(queue.length).length)}/${queue.length}]`;
+        const verb = task.unblock ? "unblock" : "block";
+        this.progress(`${position} ${verb} @${task.handle}: ${status.replaceAll("_", " ")}${note ? ` (${note})` : ""}`);
 
         if (status === "failed") {
           if (rateLimited) return "rate_limited";
@@ -84,7 +113,7 @@ class Runner {
         } else {
           failuresInARow = 0;
         }
-        if (index < queue.length - 1) await pause(status === "blocked" ? TIMING.afterBlock : TIMING.afterSkip);
+        if (index < queue.length - 1) await pause(ACTED.has(status) ? TIMING.afterBlock : TIMING.afterSkip);
       }
       return null;
     } finally {
@@ -92,17 +121,20 @@ class Runner {
     }
   }
 
-  /** One handle, retrying temporary errors (30s, 15 min, 15 min) before giving up. */
-  async #visit(handle) {
-    let blockSent = false;
+  /** One account, retrying temporary errors (30s, 15 min, 15 min) before giving up. */
+  async #visit({ handle, unblock }) {
+    let actionSent = false;
     for (let attempt = 0; ; attempt++) {
-      const outcome = await this.#attempt(handle);
-      blockSent ||= Boolean(outcome.blockSent);
+      const outcome = await this.#attempt(handle, unblock);
+      actionSent ||= Boolean(outcome.actionSent);
 
       if (!TEMPORARY.has(outcome.status)) {
-        // An earlier attempt clicked "Block" but couldn't confirm it: that block went through.
-        if (outcome.status === "already_blocked" && blockSent) return { status: "blocked", note: "confirmed on retry" };
-        return outcome;
+        // An earlier attempt clicked but couldn't confirm it, and this one finds it done: it went through.
+        const echo = unblock ? "not_blocked" : "already_blocked";
+        if (actionSent && outcome.status === echo) {
+          return { status: unblock ? "unblocked" : "blocked", note: "confirmed on retry" };
+        }
+        return outcome.status === "unblocked" ? { ...outcome, note: "no longer on the list" } : outcome;
       }
 
       const rateLimited = outcome.status === "rate_limited";
@@ -117,13 +149,18 @@ class Runner {
     }
   }
 
-  async #attempt(handle) {
+  async #attempt(handle, unblock) {
     try {
       await this.#ensurePage();
       const verdict = await inspectProfile(this.#page, handle);
       if (verdict.status === "logged_out") throw notLoggedIn();
-      if (verdict.status !== "ready") return verdict;
-      return await blockFromProfile(this.#page, handle, { dryRun: this.dryRun });
+      if (unblock) {
+        if (verdict.status === "ready") return { status: "not_blocked" };
+        if (verdict.status !== "already_blocked") return verdict;
+      } else if (verdict.status !== "ready") {
+        return verdict;
+      }
+      return await toggleBlock(this.#page, handle, { unblock, dryRun: this.dryRun });
     } catch (error) {
       if (error instanceof NotLoggedInError) throw error;
       // Playwright or browser error: start over with a fresh page (or a fresh Chrome) next time.
@@ -152,7 +189,7 @@ class Runner {
   }
 
   #dailyCapReached() {
-    return !this.dryRun && this.log.countBlocksSince(Date.now() - DAY) >= this.dailyCap;
+    return !this.dryRun && this.log.countActionsSince(Date.now() - DAY) >= this.dailyCap;
   }
 }
 
@@ -176,10 +213,10 @@ async function checkLogin(page) {
 }
 
 /**
- * Blocks the profile open in `page` through its ··· menu, after checking the menu names the
- * right handle. In a dry run, it only opens the menu and checks it.
+ * Blocks (or unblocks) the profile open in `page` through its ··· menu, after checking the menu
+ * names the right handle. In a dry run, it only opens the menu and checks it.
  */
-async function blockFromProfile(page, handle, { dryRun }) {
+async function toggleBlock(page, handle, { unblock, dryRun }) {
   await page.locator('[data-testid="userActions"]').first().click();
   const menu = page.locator('[role="menu"]');
   const item = menu
@@ -193,38 +230,45 @@ async function blockFromProfile(page, handle, { dryRun }) {
   if (shown?.toLowerCase() !== handle.toLowerCase()) {
     return closeMenu(page, { status: "mismatch", note: `menu reads "${text}"` });
   }
-  if ((await item.getAttribute("data-testid")) === "unblock" || /^unblock/i.test(text)) {
-    return closeMenu(page, { status: "already_blocked" });
-  }
-  if (dryRun) return closeMenu(page, { status: "would_block" });
+  const isBlocked = (await item.getAttribute("data-testid")) === "unblock" || /^unblock/i.test(text);
+  if (!unblock && isBlocked) return closeMenu(page, { status: "already_blocked" });
+  if (unblock && !isBlocked) return closeMenu(page, { status: "not_blocked" });
+  if (dryRun) return closeMenu(page, { status: unblock ? "would_unblock" : "would_block" });
 
-  await item.click();
-  const confirm = page.locator('[data-testid="confirmationSheetConfirm"]');
-  await confirm.waitFor({ timeout: 5000 });
-  const response = page.waitForResponse((r) => new URL(r.url()).pathname.includes("/blocks/create"), {
-    timeout: TIMING.blockConfirmTimeout,
+  const endpoint = unblock ? "/blocks/destroy" : "/blocks/create";
+  const response = page.waitForResponse((r) => new URL(r.url()).pathname.includes(endpoint), {
+    timeout: TIMING.confirmTimeout + 5000,
   });
   response.catch(() => {}); // handled below; this only avoids an unhandled rejection
-  await confirm.click();
-  return { ...(await blockConfirmation(page, response)), blockSent: true };
+  await item.click();
+  // X always asks to confirm a block. An unblock may go through without asking.
+  const confirm = page.locator('[data-testid="confirmationSheetConfirm"]');
+  if (unblock) await confirm.click({ timeout: 3000 }).catch(() => {});
+  else await confirm.click({ timeout: 5000 });
+  return { ...(await confirmation(page, response, { unblock })), actionSent: true };
 }
 
-/** Success is a 2xx from /blocks/create or the profile's Unblock button showing up, within 10s. */
-async function blockConfirmation(page, responsePromise) {
+/**
+ * Success is a 2xx from X's API, or the profile's button changing within 10s:
+ * "Blocked" (…-unblock) after a block, "Follow" (…-follow) after an unblock.
+ */
+async function confirmation(page, responsePromise, { unblock }) {
+  const done = unblock ? "unblocked" : "blocked";
   const fromApi = responsePromise.then((response) => {
-    if (response.ok()) return { status: "blocked" };
-    const note = `blocks/create returned HTTP ${response.status()}`;
+    if (response.ok()) return { status: done };
+    const note = `${unblock ? "blocks/destroy" : "blocks/create"} returned HTTP ${response.status()}`;
     return { status: response.status() === 429 ? "rate_limited" : "error", note };
   });
+  const button = unblock ? '[data-testid$="-follow"]' : '[data-testid$="-unblock"]';
   const fromPage = page
-    .locator('[data-testid="primaryColumn"] [data-testid$="-unblock"]')
+    .locator(`[data-testid="primaryColumn"] ${button}`)
     .first()
-    .waitFor({ timeout: TIMING.blockConfirmTimeout })
-    .then(() => ({ status: "blocked" }));
+    .waitFor({ timeout: TIMING.confirmTimeout })
+    .then(() => ({ status: done }));
   try {
     return await Promise.any([fromApi, fromPage]);
   } catch {
-    return { status: "error", note: "block not confirmed within 10s" };
+    return { status: "error", note: `${unblock ? "unblock" : "block"} not confirmed within 10s` };
   }
 }
 

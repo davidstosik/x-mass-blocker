@@ -10,20 +10,22 @@ const help = (paths) => `Block every X account on levels.io's "blocked for AI re
 
 Usage:
   x-mass-blocker login [--paste]   Log in to X in Chrome and save the session
-  x-mass-blocker run [options]     Visit each account on the list and block it
+  x-mass-blocker run [options]     Unblock accounts removed from the list, then block the rest
   x-mass-blocker stats [--json]    Count the results so far
 
 Options for login:
-  --paste            Paste the auth_token and ct0 cookies instead of opening Chrome
+  --paste                Paste the auth_token and ct0 cookies instead of opening Chrome
 
 Options for run:
-  --dry-run          Open each Block menu and check it, but never block or record anything
-  -n, --limit N      Visit at most N accounts this run
-  --daily-cap N      Stop once N accounts were blocked in the last 24 hours (default: ${DEFAULT_DAILY_CAP})
-  --headed           Show the browser window
-  --list URL|FILE    Use another list (default: ${DEFAULT_LIST_URL})
-  --recheck          Visit accounts again even if a previous run already settled them
-  --json             Print the summary as JSON on stdout (progress always goes to stderr)
+  --dry-run              Open each menu and check it, but never block, unblock or record anything
+  -n, --limit N          Visit at most N accounts this run
+  --daily-cap N          Stop once N accounts were blocked or unblocked in the last 24 hours (default: ${DEFAULT_DAILY_CAP})
+  --headed               Show the browser window
+  --list URL|FILE        Use another list (default: ${DEFAULT_LIST_URL})
+  --recheck              Visit accounts again even if a previous run already settled them
+  --no-unblock           Don't unblock accounts that were removed from the list
+  --allow-mass-unblock   Unblock them even if unusually many left the list at once
+  --json                 Print the summary as JSON on stdout (progress always goes to stderr)
 
 Exit codes: 0 done, 1 error, 2 stopped early (run again later), 3 not logged in.
 Session and results are kept in ${paths.dir}
@@ -47,6 +49,8 @@ async function runCommand(args, paths) {
     headed: { type: "boolean" },
     list: { type: "string" },
     recheck: { type: "boolean" },
+    "no-unblock": { type: "boolean" },
+    "allow-mass-unblock": { type: "boolean" },
     json: { type: "boolean" },
   });
 
@@ -63,40 +67,56 @@ async function runCommand(args, paths) {
     dryRun: Boolean(options["dry-run"]),
     headed: Boolean(options.headed),
     recheck: Boolean(options.recheck),
+    unblock: !options["no-unblock"],
+    allowMassUnblock: Boolean(options["allow-mass-unblock"]),
     progress,
   });
 
   if (options.json) {
     console.log(JSON.stringify(summary, null, 2));
   } else if (summary.dryRun) {
-    console.log(`Dry run: would block ${n(summary.wouldBlock)}, skipped ${n(summary.skipped)}, failed ${n(summary.failed)}.`);
-  } else {
     console.log(
-      `Blocked ${n(summary.blocked)}, skipped ${n(summary.skipped)}, failed ${n(summary.failed)}. ` +
+      `Dry run: would block ${n(summary.wouldBlock)}, would unblock ${n(summary.wouldUnblock)}, ` +
+        `skipped ${n(summary.skipped)}, failed ${n(summary.failed)}.`,
+    );
+  } else {
+    const unblocked = summary.unblocked ? `, unblocked ${n(summary.unblocked)}` : "";
+    console.log(
+      `Blocked ${n(summary.blocked)}${unblocked}, skipped ${n(summary.skipped)}, failed ${n(summary.failed)}. ` +
         `${n(summary.remaining)} accounts left on the list.`,
     );
   }
   return summary.stopped ? EXIT.STOPPED : EXIT.OK;
 }
 
-const STATUS_ORDER = ["blocked", "already_blocked", "not_found", "suspended", "unavailable", "mismatch", "failed"];
+const STATUS_ORDER = [
+  "blocked",
+  "already_blocked",
+  "unblocked",
+  "not_blocked",
+  "not_found",
+  "suspended",
+  "unavailable",
+  "mismatch",
+  "failed",
+];
 
 async function statsCommand(args, paths) {
   const { json } = parse(args, { json: { type: "boolean" } });
   const log = await ResultLog.load(paths.results);
   const byStatus = log.tally();
   const total = Object.values(byStatus).reduce((sum, count) => sum + count, 0);
-  const blockedLast24h = log.countBlocksSince(Date.now() - DAY);
+  const actionsLast24h = log.countActionsSince(Date.now() - DAY);
 
   if (json) {
-    console.log(JSON.stringify({ byStatus, total, blockedLast24h }, null, 2));
+    console.log(JSON.stringify({ byStatus, total, actionsLast24h }, null, 2));
   } else if (total === 0) {
     console.log("No results yet. Run `x-mass-blocker run` first.");
   } else {
     const statuses = Object.keys(byStatus).sort((a, b) => rank(a) - rank(b));
     const rows = [...statuses.map((status) => [status, byStatus[status]]), ["total", total]];
     for (const [label, count] of rows) console.log(`${label.padEnd(16)}${n(count).padStart(7)}`);
-    console.log(`\nBlocked in the last 24 hours: ${n(blockedLast24h)}`);
+    console.log(`\nBlocked or unblocked in the last 24 hours: ${n(actionsLast24h)}`);
   }
   return EXIT.OK;
 }

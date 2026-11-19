@@ -3,8 +3,14 @@ import path from "node:path";
 
 export const DEFAULT_LIST_URL = "https://blockedforaireply.levels.io/api/usernames.txt";
 
-/** X doesn't publish its limits. 400 blocks a day is a cautious guess. */
+/** X doesn't publish its limits. 400 blocks and unblocks a day is a cautious guess. */
 export const DEFAULT_DAILY_CAP = 400;
+
+/**
+ * levels.io doesn't publish pardons: a pardoned handle just disappears from the list. So a broken
+ * or cut-off download would look like a mass pardon. Unblock at most this many at once unless told to.
+ */
+export const MASS_UNBLOCK = { minimum: 10, share: 0.05 };
 
 export const EXIT = {
   OK: 0,
@@ -22,7 +28,7 @@ export const TIMING = {
   loginCookieSettle: 3 * SECOND, // X rotates ct0 right after login
   loginCheckTimeout: 30 * SECOND,
   profileTimeout: 25 * SECOND,
-  blockConfirmTimeout: 10 * SECOND,
+  confirmTimeout: 10 * SECOND, // for X to confirm a block or an unblock
   pollInterval: 500,
   afterBlock: [3 * SECOND, 5 * SECOND],
   afterSkip: [1 * SECOND, 2 * SECOND],

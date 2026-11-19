@@ -3,7 +3,12 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { loadList, parseList } from "../src/list.js";
+import { listId, loadList, parseList } from "../src/list.js";
+
+test("listId keeps URLs and makes file paths absolute", () => {
+  assert.equal(listId("https://example.com/list.txt"), "https://example.com/list.txt");
+  assert.equal(listId("sample.txt"), path.resolve("sample.txt"));
+});
 
 test("parseList trims lines, drops a leading @ and keeps valid handles", () => {
   const text = "alice\r\n  @bob  \n\ncarol_99\nnot a handle\nhttps://x.com/dave\n" + "x".repeat(51) + "\n";

@@ -1,11 +1,19 @@
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { CliError } from "./errors.js";
 
 const HANDLE = /^\w{1,50}$/;
 
+const isUrl = (source) => /^https?:\/\//i.test(source);
+
+/** How a list is named in the results log: its URL, or the absolute path of the file. */
+export function listId(source) {
+  return isUrl(source) ? source : path.resolve(source);
+}
+
 /** Loads a list of X handles from a URL or a local file. */
 export async function loadList(source) {
-  const text = /^https?:\/\//i.test(source) ? await download(source) : await readLocal(source);
+  const text = isUrl(source) ? await download(source) : await readLocal(source);
   const handles = parseList(text);
   if (handles.length === 0) throw new CliError(`No usernames found in ${source}.`);
   return handles;

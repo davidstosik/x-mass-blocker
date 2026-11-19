@@ -4,7 +4,7 @@
 
 Blocks every X account on [levels.io's "blocked for AI reply" list](https://blockedforaireply.levels.io) from your own account, using the Google Chrome already installed on your computer.
 
-The site offers a prompt for AI browser agents that visits about 3,700 profiles and blocks them one by one. Done by an LLM, that costs tens of millions of tokens per run. This script does the same clicks for free, remembers where it left off, and stays under a daily cap.
+The site offers a prompt for AI browser agents that visits about 3,700 profiles and blocks them one by one. Done by an LLM, that costs tens of millions of tokens per run. This script does the same clicks for free, remembers where it left off, stays under a daily cap, and unblocks accounts that were taken off the list after an appeal.
 
 ## Quick start
 
@@ -22,7 +22,7 @@ npx github:davidstosik/x-mass-blocker run
 ```
 
 > [!IMPORTANT]
-> This is v1. The parts that read X's logged-in pages haven't been tested on a real account yet, so always do the dry run first and watch it.
+> This is v1, tested on a single account with a sample of 20 blocks and 2 unblocks. X changes its pages often, so do the dry run first and watch it.
 
 At 400 blocks a day, the whole list takes about 10 runs. Each run picks up where the last one stopped.
 
@@ -43,19 +43,21 @@ If it exits with code 3, ask me to log in again.
 | --- | --- |
 | `login` | Opens Chrome on X's login page and saves the session once you're logged in. |
 | `login --paste` | Asks for the `auth_token` and `ct0` cookies (copied from a logged-in browser) instead. |
-| `run` | Visits each account on the list and blocks it. |
+| `run` | Unblocks accounts removed from the list, then blocks the rest. |
 | `stats [--json]` | Counts the results so far. |
 
 Options for `run`:
 
 | Option | Default | |
 | --- | --- | --- |
-| `--dry-run` | | Open each Block menu and check it, then press Escape. Nothing is blocked or recorded. |
+| `--dry-run` | | Open each menu and check it, then press Escape. Nothing is blocked, unblocked or recorded. |
 | `-n, --limit N` | all | Visit at most N accounts this run. |
-| `--daily-cap N` | 400 | Stop once N accounts were blocked in the last 24 hours. |
+| `--daily-cap N` | 400 | Stop once N accounts were blocked or unblocked in the last 24 hours. |
 | `--headed` | | Show the browser window. |
 | `--list URL\|FILE` | levels.io list | Use another list, one username per line. |
 | `--recheck` | | Visit accounts again even if a previous run settled them. |
+| `--no-unblock` | | Don't unblock accounts that were removed from the list. |
+| `--allow-mass-unblock` | | Unblock them even if unusually many left the list at once (see below). |
 | `--json` | | Print the summary as JSON on stdout. Progress always goes to stderr. |
 
 Exit codes: `0` done, `1` error, `2` stopped early (daily cap, rate limit or repeated failures: run again later), `3` not logged in.
@@ -69,12 +71,23 @@ Exit codes: `0` done, `1` error, `2` stopped early (daily cap, rate limit or rep
 - On errors it retries after 30 seconds, then 15 minutes twice. It stops after 3 failures in a row or when X keeps rate limiting.
 - Each result is saved right away, so you can stop it with Ctrl-C at any time.
 
+### Pardons
+
+Appeals are reviewed by hand on levels.io, and an accepted one simply removes the handle from the list. So at the start of each run, the script looks for accounts **it** blocked from this list that are no longer on it, and unblocks them first. Accounts you had blocked yourself before the script got to them are never unblocked.
+
+A broken or cut-off download would look like a mass pardon. So if more than 10 accounts, or 5% of the script's blocks, left the list at once, the script unblocks none of them and says so. If the list really shrank, run again with `--allow-mass-unblock`.
+
 ## Files and privacy
 
 Everything lives in `~/.config/x-mass-blocker/` (or `$XDG_CONFIG_HOME/x-mass-blocker/`, or `$X_MASS_BLOCKER_HOME`):
 
 - `session.json` holds your X session cookies. **Anyone with this file can use your X account.** It's readable only by you (`chmod 600`). To revoke it, delete the file and log the session out in X's settings (Security and account access > Apps and sessions).
-- `results.jsonl` has one line per visited account: `{"username", "status", "note", "at"}`.
+- `results.jsonl` is the record of every run. Lines are only ever added, one per visit, so an account's history stays readable:
+  ```jsonl
+  {"username":"example","status":"blocked","list":"https://blockedforaireply.levels.io/api/usernames.txt","at":"2026-11-20T09:42:03.551Z"}
+  {"username":"example","status":"unblocked","note":"no longer on the list","list":"https://blockedforaireply.levels.io/api/usernames.txt","at":"2026-12-02T10:01:44.120Z"}
+  ```
+  `blocked` and `unblocked` are what the script did. The other statuses are what it found: `already_blocked` (blocked before the script got there), `not_blocked` (already unblocked when it came to unblock), `not_found`, `suspended`, `unavailable`, `mismatch` (the page showed another handle) and `failed`.
 
 The script only talks to X and to the list's URL.
 
