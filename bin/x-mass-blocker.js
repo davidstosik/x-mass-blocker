@@ -29,6 +29,8 @@ Options for run:
   --allow-mass-unblock   Unblock them even if unusually many left the list at once
   --json                 Print the summary as JSON on stdout (progress always goes to stderr)
 
+Run verifies the signed-in X account before using its history, even with no tasks queued.
+
 Exit codes: 0 done, 1 error, 2 stopped early (run again later), 3 not logged in.
 Session and results are kept in ${paths.dir}
 (set X_MASS_BLOCKER_HOME to use another folder).
@@ -90,8 +92,8 @@ async function runCommand(args, paths) {
   } else {
     const unblocked = summary.unblocked ? `, unblocked ${n(summary.unblocked)}` : "";
     console.log(
-      `Blocked ${n(summary.blocked)}${unblocked}, skipped ${n(summary.skipped)}, failed ${n(summary.failed)}. ` +
-        `${n(summary.remaining)} accounts left on the list.`,
+      `Blocked ${n(summary.blocked)}${unblocked}, skipped ${n(summary.skipped)}, failed ${n(summary.failed)}.` +
+        (summary.remaining === null ? "" : ` ${n(summary.remaining)} accounts left on the list.`),
     );
   }
   return summary.stopped ? EXIT.STOPPED : EXIT.OK;

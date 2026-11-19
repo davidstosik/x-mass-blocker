@@ -6,6 +6,7 @@ import { launchChrome, readSession, saveSession, XBrowser } from "./browser.js";
 import { TIMING } from "./config.js";
 import { CliError, NotLoggedInError } from "./errors.js";
 import { isLoginUrl } from "./profile.js";
+import { isUserId } from "./user-id.js";
 
 const LOGIN_URL = "https://x.com/i/flow/login";
 const LOGOUT_URL = "https://x.com/logout";
@@ -116,6 +117,59 @@ export async function checkLogin(page) {
     await sleep(TIMING.pollInterval);
   }
   return "unknown";
+}
+
+export class AccountIdentityError extends CliError {}
+
+export class AccountVerificationRateLimitError extends Error {}
+
+/** Reads the stable ID from the X lookup for the signed-in account's own profile link. */
+export async function verifyAccountId(page) {
+  const timeout = TIMING.loginCheckTimeout;
+  const temporary = () => new Error("Could not complete the signed-in X account lookup. Try again later.");
+  let result;
+  let handle;
+  try {
+    const href = await page.locator('[data-testid="AppTabBar_Profile_Link"]').getAttribute("href", { timeout });
+    handle = /^\/(\w+)\/?$/.exec(href)?.[1].toLowerCase();
+    if (!handle) throw temporary();
+
+    const profileUrl = `https://x.com/${handle}`;
+    const checkResponse = (response) => {
+      const status = response?.status();
+      if (status === 429) throw new AccountVerificationRateLimitError();
+      if (status !== undefined && status !== 200) throw temporary();
+      return response;
+    };
+    const [response] = await Promise.all([
+      page.waitForResponse((candidate) => {
+        const url = new URL(candidate.url());
+        if (
+          !["https://x.com", "https://api.x.com"].includes(url.origin) ||
+          !url.pathname.endsWith("/UserByScreenName")
+        ) return false;
+        try {
+          return JSON.parse(url.searchParams.get("variables"))?.screen_name?.toLowerCase() === handle;
+        } catch {
+          return false;
+        }
+      }, { timeout }).then(checkResponse),
+      page.goto(profileUrl, { waitUntil: "domcontentloaded", timeout }).then((response) => {
+        checkResponse(response);
+        if (page.url().replace(/\/$/, "").toLowerCase() !== profileUrl) throw temporary();
+      }),
+    ]);
+    result = (await response.json())?.data?.user?.result;
+  } catch (error) {
+    if (error instanceof AccountVerificationRateLimitError) throw error;
+    // Browser errors may include request details.
+    throw temporary();
+  }
+
+  const shown = result?.core?.screen_name ?? result?.legacy?.screen_name;
+  if (result?.__typename === "User" && typeof shown === "string" &&
+      shown.toLowerCase() === handle && isUserId(result.rest_id)) return result.rest_id;
+  throw new AccountIdentityError("Could not verify the signed-in X account ID from its profile lookup.");
 }
 
 /**

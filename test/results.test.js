@@ -23,25 +23,34 @@ test("a missing log loads as empty", async () => {
 
 test("record appends one JSON line and creates the folder", async () => {
   const file = await tempFile();
-  const log = await ResultLog.load(file);
+  const log = await ResultLog.load(file, "123");
   await log.record("alice", "blocked", { list: LIST, userId: "9007199254740993" });
   await log.record("bob", "failed", { note: "HTTP 500", list: LIST });
 
   const lines = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(lines.length, 2);
   assert.equal(lines[0].userId, "9007199254740993");
-  assert.equal((await ResultLog.load(file)).lastAction("alice").userId, lines[0].userId);
-  assert.deepEqual(Object.keys(lines[1]), ["username", "status", "note", "list", "at"]);
+  assert.equal((await ResultLog.load(file, "123")).lastAction("alice").userId, lines[0].userId);
+  assert.deepEqual(Object.keys(lines[1]), ["accountId", "username", "status", "note", "list", "at"]);
+  assert.equal(lines[0].accountId, "123");
+});
+
+test("an unscoped log can be read but cannot record results", async () => {
+  const file = await tempFile();
+  const log = await ResultLog.load(file);
+  await assert.rejects(log.record("alice", "blocked"), /verified X account ID is required/);
+  assert.deepEqual(log.tally(), {});
+  await assert.rejects(readFile(file), { code: "ENOENT" });
 });
 
 test("the latest status per handle wins, case-insensitively", async () => {
   const file = await tempFile();
-  const first = await ResultLog.load(file);
+  const first = await ResultLog.load(file, "123");
   await first.record("Alice", "failed");
   await first.record("alice", "blocked");
   await first.record("bob", "mismatch");
 
-  const log = await ResultLog.load(file);
+  const log = await ResultLog.load(file, "123");
   assert.equal(log.latest("ALICE").status, "blocked");
   assert.equal(log.isDone("alice"), true);
   assert.equal(log.isDone("bob"), false);

@@ -96,7 +96,7 @@ Once I agree, run the same release from GitHub:
 | `login` | Opens Chrome on X's login page and saves the session once you're logged in. |
 | `login --paste` | Asks for the `auth_token` and `ct0` cookies (copied from a logged-in browser) instead. |
 | `run` | Unblocks accounts removed from the list, then blocks the rest. |
-| `stats [--json]` | Counts the results so far. |
+| `stats [--json]` | Counts results across the journal, keeping each account’s targets separate. |
 | `logout` | Logs the saved session out of X, checks that X no longer accepts it, then deletes it. |
 
 Options for `run`:
@@ -139,9 +139,13 @@ Everything lives in `~/.config/x-mass-blocker/` (or `$XDG_CONFIG_HOME/x-mass-blo
 - `session.json` holds your X session cookies. **Anyone with this file can use your X account.** It's readable only by you (`chmod 600`). To revoke it, run `logout`. Deleting the file yourself isn't enough: a copy of it would keep working until the session is logged out. You can also end the session in X's settings (Security and account access > Apps and sessions).
 - `results.jsonl` is the record of every run. Lines are only ever added, one per visit, so an account's history stays readable:
   ```jsonl
-  {"username":"example","status":"blocked","list":"https://blockedforaireply.levels.io/api/usernames.txt","userId":"9007199254740993","at":"2026-11-20T09:42:03.551Z"}
-  {"username":"example","status":"unblocked","note":"no longer on the list","list":"https://blockedforaireply.levels.io/api/usernames.txt","userId":"9007199254740993","at":"2026-12-02T10:01:44.120Z"}
+  {"accountId":"123456789","username":"example","status":"blocked","list":"https://blockedforaireply.levels.io/api/usernames.txt","userId":"9007199254740993","at":"2026-11-20T09:42:03.551Z"}
+  {"accountId":"123456789","username":"example","status":"unblocked","note":"no longer on the list","list":"https://blockedforaireply.levels.io/api/usernames.txt","userId":"9007199254740993","at":"2026-12-02T10:01:44.120Z"}
   ```
+  `run` starts Chrome and verifies the stable X user ID of the signed-in account before using history, even if there are no queued tasks or the daily cap has already been reached. Previous observations, automatic unblocks, and the daily cap use only that ID, even after refreshing the saved session.
+
+  For older journals with rows that lack an account ID, move `results.jsonl` aside to start with an empty journal, or explicitly migrate each row by adding its verified owner’s X user ID as an `accountId` string. If you cannot establish who owned the rows, start fresh. Automatic unblocking requires recorded block actions for the signed-in account.
+
   `blocked` and `unblocked` are what the script did. The other statuses are what it found: `already_blocked` (blocked before the script got there), `not_blocked` (already unblocked when it came to unblock), `not_found`, `suspended`, `unavailable`, `mismatch` (the handle or user ID couldn't be verified) and `failed`.
 
 The script only talks to X and to the list's URL.

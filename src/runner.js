@@ -1,9 +1,9 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { readSession, XBrowser } from "./browser.js";
 import { DAY, MASS_UNBLOCK, MAX_FAILURES_IN_A_ROW, TIMING } from "./config.js";
-import { NotLoggedInError } from "./errors.js";
+import { CliError, NotLoggedInError } from "./errors.js";
 import { listId, loadList } from "./list.js";
-import { checkLogin } from "./login.js";
+import { AccountIdentityError, AccountVerificationRateLimitError, checkLogin, verifyAccountId } from "./login.js";
 import { inspectProfile } from "./profile.js";
 import { ResultLog } from "./results.js";
 
@@ -12,7 +12,7 @@ const ACTED = new Set(["blocked", "unblocked", "would_block", "would_unblock"]);
 
 const STOP_MESSAGES = {
   daily_cap: (cap) => `Daily cap reached (${cap} blocks and unblocks in the last 24 hours).`,
-  rate_limited: () => "X keeps rate limiting this account.",
+  rate_limited: () => "X rate limited this account.",
   too_many_failures: () => `${MAX_FAILURES_IN_A_ROW} accounts failed in a row.`,
 };
 
@@ -21,28 +21,46 @@ const STOP_MESSAGES = {
  * every account on the list that isn't done yet. Each result is appended to the log right
  * away, so stopping at any point loses nothing.
  */
-export async function run({ paths, list, limit, dailyCap, dryRun, headed, recheck, unblock, allowMassUnblock, progress }) {
-  const log = await ResultLog.load(paths.results);
-  const source = listId(list);
-  const handles = await loadList(list);
+export async function run(
+  { paths, list, limit, dailyCap, dryRun, headed, recheck, unblock, allowMassUnblock, progress },
+  { startBrowser = (options) => XBrowser.start(options) } = {},
+) {
+  const runner = new Runner({ sessionFile: paths.session, dailyCap, dryRun, headed, progress, startBrowser });
+  let log;
+  let handles;
+  let heldBack;
+  let stopped;
+  try {
+    const accountId = await runner.authenticate();
+    log = await ResultLog.load(paths.results, accountId);
+    const source = listId(list);
+    handles = await loadList(list);
 
-  const { toUnblock, heldBack } = unblock
-    ? pardonedAccounts(log, source, handles, { allowMassUnblock, progress })
-    : { toUnblock: [], heldBack: 0 };
-  const toBlock = recheck ? handles : handles.filter((handle) => !log.isDone(handle));
-  const tasks = [
-    ...toUnblock.map(({ username, userId }) => ({ handle: username, unblock: true, expectedUserId: userId })),
-    ...toBlock.map((handle) => ({ handle, unblock: false })),
-  ];
-  const queue = limit ? tasks.slice(0, limit) : tasks;
-  progress(
-    `${handles.length} accounts on the list, ${handles.length - toBlock.length} already done` +
-      `${toUnblock.length ? `, ${toUnblock.length} removed since the tool blocked them` : ""}. ` +
-      `Visiting ${queue.length}${dryRun ? " (dry run: nothing will be blocked or unblocked)" : ""}.`,
-  );
+    const pardons = unblock
+      ? pardonedAccounts(log, source, handles, { allowMassUnblock, progress })
+      : { toUnblock: [], heldBack: 0 };
+    const { toUnblock } = pardons;
+    heldBack = pardons.heldBack;
+    const toBlock = recheck ? handles : handles.filter((handle) => !log.isDone(handle));
+    const tasks = [
+      ...toUnblock.map(({ username, userId }) => ({ handle: username, unblock: true, expectedUserId: userId })),
+      ...toBlock.map((handle) => ({ handle, unblock: false })),
+    ];
+    const queue = limit ? tasks.slice(0, limit) : tasks;
+    progress(
+      `${handles.length} accounts on the list, ${handles.length - toBlock.length} already done` +
+        `${toUnblock.length ? `, ${toUnblock.length} removed since the tool blocked them` : ""}. ` +
+        `Visiting ${queue.length}${dryRun ? " (dry run: nothing will be blocked or unblocked)" : ""}.`,
+    );
 
-  const runner = new Runner({ sessionFile: paths.session, log, list: source, dailyCap, dryRun, headed, progress });
-  const stopped = await runner.process(queue);
+    stopped = await runner.process(queue, log, source);
+  } catch (error) {
+    if (!(error instanceof AccountVerificationRateLimitError)) throw error;
+    stopped = "rate_limited";
+  } finally {
+    await runner.close();
+  }
+
   if (stopped) progress(`Stopped early: ${STOP_MESSAGES[stopped](dailyCap)} Run again later.`);
 
   const count = (status) => runner.counts[status] ?? 0;
@@ -57,7 +75,7 @@ export async function run({ paths, list, limit, dailyCap, dryRun, headed, rechec
     skipped: runner.visited - acted - failed,
     failed,
     byStatus: runner.counts,
-    remaining: handles.filter((handle) => !log.isDone(handle)).length,
+    remaining: handles?.filter((handle) => !log.isDone(handle)).length ?? null,
     ...(heldBack ? { unblockHeldBack: heldBack } : {}),
     stopped,
   };
@@ -82,44 +100,49 @@ class Runner {
   visited = 0;
   #browser = null;
   #page = null;
+  #accountId = null;
 
-  constructor({ sessionFile, log, list, dailyCap, dryRun, headed, progress }) {
-    Object.assign(this, { sessionFile, log, list, dailyCap, dryRun, headed, progress });
+  constructor({ sessionFile, dailyCap, dryRun, headed, progress, startBrowser }) {
+    Object.assign(this, { sessionFile, dailyCap, dryRun, headed, progress, startBrowser });
+  }
+
+  async authenticate() {
+    try {
+      await this.#ensurePage();
+    } catch (error) {
+      if (error instanceof CliError || error instanceof AccountVerificationRateLimitError) throw error;
+      throw new CliError(error.message);
+    }
+    return this.#accountId;
+  }
+
+  async close() {
+    await this.#browser?.close();
   }
 
   /** Returns why it stopped early ("daily_cap", "rate_limited", "too_many_failures"), or null. */
-  async process(queue) {
-    if (queue.length === 0) return null;
-    if (this.#dailyCapReached()) return "daily_cap";
+  async process(queue, log, source) {
+    let failuresInARow = 0;
+    for (const [index, task] of queue.entries()) {
+      if (this.#dailyCapReached(log)) return "daily_cap";
 
-    try {
-      await this.#ensurePage();
-      if ((await checkLogin(this.#page)) !== "in") throw notLoggedIn();
+      const { status, note, rateLimited, userId } = await this.#visit(task);
+      if (!this.dryRun) await log.record(task.handle, status, { note, list: source, userId });
+      this.counts[status] = (this.counts[status] ?? 0) + 1;
+      this.visited++;
+      const position = `[${String(index + 1).padStart(String(queue.length).length)}/${queue.length}]`;
+      const verb = task.unblock ? "unblock" : "block";
+      this.progress(`${position} ${verb} @${task.handle}: ${status.replaceAll("_", " ")}${note ? ` (${note})` : ""}`);
 
-      let failuresInARow = 0;
-      for (const [index, task] of queue.entries()) {
-        if (this.#dailyCapReached()) return "daily_cap";
-
-        const { status, note, rateLimited, userId } = await this.#visit(task);
-        if (!this.dryRun) await this.log.record(task.handle, status, { note, list: this.list, userId });
-        this.counts[status] = (this.counts[status] ?? 0) + 1;
-        this.visited++;
-        const position = `[${String(index + 1).padStart(String(queue.length).length)}/${queue.length}]`;
-        const verb = task.unblock ? "unblock" : "block";
-        this.progress(`${position} ${verb} @${task.handle}: ${status.replaceAll("_", " ")}${note ? ` (${note})` : ""}`);
-
-        if (status === "failed") {
-          if (rateLimited) return "rate_limited";
-          if (++failuresInARow >= MAX_FAILURES_IN_A_ROW) return "too_many_failures";
-        } else {
-          failuresInARow = 0;
-        }
-        if (index < queue.length - 1) await pause(ACTED.has(status) ? TIMING.afterBlock : TIMING.afterSkip);
+      if (status === "failed") {
+        if (rateLimited) return "rate_limited";
+        if (++failuresInARow >= MAX_FAILURES_IN_A_ROW) return "too_many_failures";
+      } else {
+        failuresInARow = 0;
       }
-      return null;
-    } finally {
-      await this.#browser?.close();
+      if (index < queue.length - 1) await pause(ACTED.has(status) ? TIMING.afterBlock : TIMING.afterSkip);
     }
+    return null;
   }
 
   /** One account, retrying temporary errors (30s, 15 min, 15 min) before giving up. */
@@ -170,7 +193,8 @@ class Runner {
       if (outcome.actionSent) return { ...outcome, userId: verdict.userId };
       return outcome;
     } catch (error) {
-      if (error instanceof NotLoggedInError) throw error;
+      if (error instanceof NotLoggedInError || error instanceof AccountIdentityError ||
+          error instanceof AccountVerificationRateLimitError) throw error;
       // Playwright or browser error: start over with a fresh page (or a fresh Chrome) next time.
       await this.#page?.close().catch(() => {});
       this.#page = null;
@@ -182,24 +206,42 @@ class Runner {
     if (!this.#browser?.isConnected) {
       await this.#browser?.close();
       const storageState = await readSession(this.sessionFile);
-      this.#browser = await XBrowser.start({ storageState, headed: this.headed });
+      this.#browser = await this.startBrowser({ storageState, headed: this.headed });
       this.#page = null;
     }
-    if (!this.#page || this.#page.isClosed()) this.#page = await this.#browser.newPage();
+    if (this.#page && !this.#page.isClosed()) return;
+    const page = await this.#browser.newPage();
+    try {
+      const login = await checkLogin(page);
+      if (login === "out") throw notLoggedIn();
+      if (login === "unknown") throw new Error("Could not confirm the X login. Try again later.");
+      const accountId = await verifyAccountId(page);
+      if (this.#accountId !== null && accountId !== this.#accountId) {
+        throw new AccountIdentityError("The signed-in X account changed during the run. Start a new run to use that account.");
+      }
+      this.#accountId = accountId;
+      this.#page = page;
+    } catch (error) {
+      await page.close().catch(() => {});
+      throw error;
+    }
   }
 
   async #checkLoginQuietly() {
     try {
-      await this.#ensurePage();
+      // Leave opening and verifying a replacement page to the next attempt.
+      if (!this.#page || this.#page.isClosed()) return "unknown";
       return await checkLogin(this.#page);
-    } catch {
+    } catch (error) {
+      if (error instanceof NotLoggedInError || error instanceof AccountIdentityError ||
+          error instanceof AccountVerificationRateLimitError) throw error;
       return "unknown";
     }
   }
 
-  #dailyCapReached() {
+  #dailyCapReached(log) {
     if (!this.dailyCap || this.dryRun) return false;
-    return this.log.countActionsSince(Date.now() - DAY) >= this.dailyCap;
+    return log.countActionsSince(Date.now() - DAY) >= this.dailyCap;
   }
 }
 

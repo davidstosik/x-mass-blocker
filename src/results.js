@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { CliError } from "./errors.js";
 import { isUserId } from "./user-id.js";
 
 /** Handles with one of these statuses are skipped by later block runs (unless --recheck). */
@@ -12,36 +13,48 @@ const ACTIONS = new Set(["blocked", "unblocked"]);
 const NOTHING_TO_UNBLOCK = new Set(["not_blocked", "not_found", "suspended"]);
 
 /**
- * The append-only results log: one JSON line per visit, `{username, status, note?, list, userId?, at}`.
- * The latest line for a handle is its current state; its latest blocked/unblocked line is
- * the last thing the tool did to it. Earlier lines are kept as history.
+ * The append-only results log: one JSON line per visit, `{accountId, username, status, note?, list, userId?, at}`.
+ * Runs load a single account's history. Offline stats can load the entire journal.
  */
 export class ResultLog {
-  #latest = new Map(); // lowercase username -> latest entry
-  #lastAction = new Map(); // lowercase username -> latest blocked/unblocked entry
+  #latest = new Map(); // account ID and lowercase username -> latest entry
+  #lastAction = new Map(); // account ID and lowercase username -> latest blocked/unblocked entry
   #actionTimes = []; // ms timestamps of blocked/unblocked entries
+  #accountId;
 
-  constructor(file, entries = []) {
+  constructor(file, entries = [], accountId) {
     this.file = file;
-    for (const entry of entries) this.#remember(entry);
+    this.#accountId = accountId;
+    if (accountId !== undefined) {
+      if (!isUserId(accountId)) throw new CliError("A verified X account ID is required to scope the journal.");
+      if (entries.some((entry) => !isUserId(entry.accountId))) {
+        throw new CliError(
+          `The results journal at ${file} contains history with an unknown X account owner. ` +
+            "Move the journal aside to start fresh, or explicitly migrate each row by adding its verified accountId.",
+        );
+      }
+    }
+    for (const entry of entries) {
+      if (accountId === undefined || entry.accountId === accountId) this.#remember(entry);
+    }
   }
 
-  static async load(file) {
+  static async load(file, accountId) {
     let text = "";
     try {
       text = await readFile(file, "utf8");
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    return new ResultLog(file, parseLog(text));
+    return new ResultLog(file, parseLog(text), accountId);
   }
 
   latest(username) {
-    return this.#latest.get(username.toLowerCase());
+    return this.#latest.get(this.#key(username, this.#accountId));
   }
 
   lastAction(username) {
-    return this.#lastAction.get(username.toLowerCase());
+    return this.#lastAction.get(this.#key(username, this.#accountId));
   }
 
   isDone(username) {
@@ -49,7 +62,9 @@ export class ResultLog {
   }
 
   async record(username, status, { note, list, userId } = {}) {
+    if (!this.#accountId) throw new CliError("A verified X account ID is required to record results.");
     const entry = {
+      accountId: this.#accountId,
       username,
       status,
       ...(note ? { note } : {}),
@@ -82,8 +97,8 @@ export class ResultLog {
   pardoned(list, handles) {
     const onList = new Set(handles.map((handle) => handle.toLowerCase()));
     return [...this.#lastAction.values()].filter(
-      ({ username, status, list: source, userId }) => status === "blocked" && source === list &&
-        isUserId(userId) && !onList.has(username.toLowerCase()) && !NOTHING_TO_UNBLOCK.has(this.latest(username).status),
+      ({ accountId, username, status, list: source, userId }) => status === "blocked" && source === list &&
+        isUserId(userId) && !onList.has(username.toLowerCase()) && !NOTHING_TO_UNBLOCK.has(this.#latest.get(this.#key(username, accountId)).status),
     );
   }
 
@@ -94,8 +109,12 @@ export class ResultLog {
     return counts;
   }
 
+  #key(username, accountId) {
+    return `${isUserId(accountId) ? accountId : ""}:${username.toLowerCase()}`;
+  }
+
   #remember(entry) {
-    const key = entry.username.toLowerCase();
+    const key = this.#key(entry.username, entry.accountId);
     this.#latest.set(key, entry);
     if (ACTIONS.has(entry.status)) {
       this.#lastAction.set(key, entry);
