@@ -17,6 +17,8 @@ The site offers a prompt for AI browser agents that visits about 3,700 profiles 
 
 You need Node.js 20 or later and Google Chrome. Releases are distributed through GitHub tags. The `github:` prefix tells `npx` to fetch x-mass-blocker directly from GitHub and install its dependency for you.
 
+The shortcut pins the application source to `refs/tags/v0.2.0`, and `package.json` pins the Playwright version. npm omits `package-lock.json` from the packaged install, so the shortcut does not enforce the Playwright tarball integrity hash recorded there. Use the [reviewed checkout](#read-it-before-you-run-it) to install with that hash.
+
 > [!IMPORTANT]
 > If you're upgrading from `v0.1.0`, [move aside or migrate your existing `results.jsonl`](#files-and-privacy) before running `v0.2.0`.
 
@@ -46,9 +48,7 @@ npx github:davidstosik/x-mass-blocker#refs/tags/v0.2.0 run --daily-cap 400
 
 ## Read it before you run it
 
-The commands above pin the `v0.2.0` tag by its full Git ref, `refs/tags/v0.2.0`. GitHub locks an immutable release tag to its published commit and prevents reuse of the tag name if the release and tag are deleted. See [GitHub's immutable release documentation](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
-
-To inspect the source before running it, check out the same tag.
+To inspect the source before running it, check out `refs/tags/v0.2.0`. GitHub locks an immutable release tag to its published commit and prevents reuse of the tag name if the release and tag are deleted. See [GitHub's immutable release documentation](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
 
 ```sh
 git clone --no-checkout https://github.com/davidstosik/x-mass-blocker
@@ -58,17 +58,25 @@ git rev-parse HEAD   # the commit you're reviewing
 # read package.json, package-lock.json, bin/ and src/
 ```
 
-When you're ready to run it, use the pinned `npx` commands above.
-
 Things worth checking:
 
 - **Your session.** `src/login.js` saves the X cookies to `session.json` through `saveSession` in `src/browser.js`. They're read back with `readSession` and only ever handed to Chrome. `logout` deletes the file once X has stopped accepting the session.
 - **The network.** The only request the script makes itself is the list download in `src/list.js`. Everything else is Chrome opening `x.com` pages.
-- **Install time.** Nothing runs: `playwright-core` has no dependencies and no install scripts.
+- **Install time.** `playwright-core` has no dependencies or install scripts.
+
+After reviewing, stay in that checkout. `npm ci` installs the dependency recorded in `package-lock.json` and verifies its tarball integrity. `--ignore-scripts` disables install lifecycle scripts.
+
+```sh
+npm ci --ignore-scripts
+node bin/x-mass-blocker.js login
+node bin/x-mass-blocker.js run --dry-run -n 5 --headed
+node bin/x-mass-blocker.js run
+node bin/x-mass-blocker.js logout
+```
 
 ## For AI agents
 
-Paste this into Claude Code, Codex or any agent that can run commands. It asks the agent to review the release, wait for your approval, and run that same release with `npx`.
+Paste this into Claude Code, Codex or any agent that can run commands. It asks the agent to review the release, wait for your approval, and run it from the reviewed checkout.
 
 ```text
 Before running anything, review https://github.com/davidstosik/x-mass-blocker:
@@ -81,11 +89,12 @@ Before running anything, review https://github.com/davidstosik/x-mass-blocker:
 3. Tell me what it does with my X session cookies, every host it contacts,
    and anything that runs on install. Then wait for my go-ahead.
 
-Once I agree, run the same release from GitHub:
-- Run `npx github:davidstosik/x-mass-blocker#refs/tags/v0.2.0 login` and wait
-  for me to log in.
-- Run `npx github:davidstosik/x-mass-blocker#refs/tags/v0.2.0 run --json`
-  in the background (it can take hours) and report the summary.
+Once I agree, run these commands from the checkout you reviewed:
+- Run `npm ci --ignore-scripts` to install from the reviewed lockfile.
+  Continue only if the install succeeds.
+- Run `node bin/x-mass-blocker.js login` and wait for me to log in.
+- Run `node bin/x-mass-blocker.js run --json` in the background (it can take
+  hours) and report the summary.
 - If something kills it before it exits, run it again: it picks up where it stopped.
 - If it exits with code 2, tell me to run it again later.
 - If it exits with code 3, ask me to log in again.
