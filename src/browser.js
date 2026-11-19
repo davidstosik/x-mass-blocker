@@ -17,6 +17,7 @@ const PROBE_URL = "https://x-mass-blocker.invalid/";
 export async function launchChrome({ headless, args = [] }) {
   const options = {
     headless,
+    chromiumSandbox: true,
     ignoreDefaultArgs: ["--enable-automation"],
     args: ["--disable-blink-features=AutomationControlled", ...args],
   };
@@ -25,14 +26,22 @@ export async function launchChrome({ headless, args = [] }) {
   } catch (chromeError) {
     try {
       return await chromium.launch(options);
-    } catch {
+    } catch (chromiumError) {
       throw new CliError(
-        "Could not start Google Chrome. Install it from https://www.google.com/chrome/\n" +
-          `or install Playwright's Chromium instead: npx playwright@${PLAYWRIGHT_VERSION} install chromium\n` +
-          `(${chromeError.message.split("\n")[0]})`,
+        "Could not start Google Chrome or Playwright Chromium with the Chromium sandbox enabled.\n" +
+          `Google Chrome: ${launchErrorSummary(chromeError)}\n` +
+          `Playwright Chromium: ${launchErrorSummary(chromiumError)}\n` +
+          "Use an environment that supports Chromium sandboxing. If a browser is missing, install Chrome " +
+          "from https://www.google.com/chrome/ or install Playwright's Chromium with " +
+          `npx playwright@${PLAYWRIGHT_VERSION} install chromium`,
       );
     }
   }
+}
+
+function launchErrorSummary(error) {
+  if (error.message.includes("Chromium sandboxing failed!")) return "Chromium sandboxing failed.";
+  return error.message.split("\n")[0];
 }
 
 /** Reads the saved Playwright storageState. Throws NotLoggedInError if there is none. */
