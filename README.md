@@ -15,7 +15,7 @@ The site offers a prompt for AI browser agents that visits about 3,700 profiles 
 > [!CAUTION]
 > I know: a README that tells you to run a stranger's script and hand it your X session is a red flag. I wouldn't do it blindly either. The whole thing is about 1,200 lines of JavaScript with one dependency, so read it first, or [have your agent read it](#read-it-before-you-run-it).
 
-You need Node.js 20 or later and Google Chrome. The `github:` prefix tells `npx` to fetch x-mass-blocker directly from GitHub and install its dependency for you.
+You need Node.js 20 or later and Google Chrome. Releases are distributed through GitHub tags. The `github:` prefix tells `npx` to fetch x-mass-blocker directly from GitHub and install its dependency for you.
 
 ```sh
 # 1. Log in to X in a Chrome window (use your username and password)

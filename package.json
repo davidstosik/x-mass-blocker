@@ -1,6 +1,7 @@
 {
   "name": "x-mass-blocker",
   "version": "0.1.0",
+  "private": true,
   "description": "Block every X account on levels.io's \"blocked for AI reply\" list, using your own Chrome.",
   "keywords": [
     "x",
